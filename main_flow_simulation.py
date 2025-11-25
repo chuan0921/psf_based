@@ -1,6 +1,19 @@
 import numpy as np
 import os
+import warnings
+
+# 隱藏 matplotlib 的 masked element 警告
+warnings.filterwarnings('ignore', message='Warning: converting a masked element to nan')
+
+# 設定使用 GPU 1 (必須在 import cupy 之前設定)
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+GPU_ID = 0  # 因為只有 GPU 1 可見，所以對 CuPy 來說是 device 0
+
+import cupy as cp
+from tqdm import tqdm
 from src.setting import *
+
+cp.cuda.Device(GPU_ID).use()
 from src.phantom import generate_vessel_phantom, update_scatterer_positions
 from src.speckle_image import calculate_psf_parameters, generate_ultrasound_image, apply_envelope_detection
 from src.grid import create_spatial_grid, create_roi_masks
@@ -14,6 +27,9 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     print("初始化模擬環境...")
+    print(f"使用 GPU 1 (NVIDIA H100)")
+    free_mem, total_mem = cp.cuda.Device(GPU_ID).mem_info
+    print(f"GPU 記憶體: {free_mem/1024**3:.1f} GB free / {total_mem/1024**3:.1f} GB total")
     sim_config = init_simulation()
 
     trans_cfg = TransducerConfig()
@@ -42,10 +58,10 @@ def main():
     saved_matched_image = None
     max_cc_frame_idx = None
 
-    for iter_idx in range(sim_cfg.num_iterations):
-        print(f"\n{'='*50}")
-        print(f"Iteration {iter_idx+1}/{sim_cfg.num_iterations}")
-        print(f"{'='*50}")
+    for iter_idx in tqdm(range(sim_cfg.num_iterations), desc="Iterations", unit="iter"):
+        tqdm.write(f"\n{'='*50}")
+        tqdm.write(f"Iteration {iter_idx+1}/{sim_cfg.num_iterations}")
+        tqdm.write(f"{'='*50}")
 
         x_sc, y_sc, z_sc, amps, v_profile = generate_vessel_phantom(
             sim_cfg.num_scatterers, grid_cfg.x_size, 5, grid_cfg.z_size,
@@ -67,7 +83,7 @@ def main():
 
         frame_cc_values = []
 
-        for frame_idx in range(sim_cfg.num_frames):
+        for frame_idx in tqdm(range(sim_cfg.num_frames), desc="  Frames", unit="frame", leave=False):
             y_sc = update_scatterer_positions(y_sc, v_profile, sim_cfg.dt)
 
             moving_rf = generate_ultrasound_image(
@@ -85,19 +101,17 @@ def main():
                 avg_cc = np.nanmean(roi_cc)
                 frame_cc_values.append(avg_cc)
 
-            if frame_idx % 10 == 0:
-                print(f"  Frame {frame_idx}/{sim_cfg.num_frames}: avg CC = {np.nanmean(roi_cc):.3f}")
-
         if iter_idx == 0 and len(frame_cc_values) > 0:
             max_cc_frame_idx = np.argmax(frame_cc_values)
             saved_matched_image = animation_frames[max_cc_frame_idx].copy()
-            print(f"\nMax CC at frame {max_cc_frame_idx}: {frame_cc_values[max_cc_frame_idx]:.3f}")
+            tqdm.write(f"\nMax CC at frame {max_cc_frame_idx}: {frame_cc_values[max_cc_frame_idx]:.3f}")
 
     print("\n速度估算...")
     measured_velocities = estimate_velocities_batch(all_roi_cc, sim_cfg.dt, y_distance)
 
-    avg_vel = np.mean(measured_velocities, axis=1)
-    std_vel = np.std(measured_velocities, axis=1)
+    # 使用 nanmean/nanstd 忽略無效的速度估算
+    avg_vel = np.nanmean(measured_velocities, axis=1)
+    std_vel = np.nanstd(measured_velocities, axis=1)
 
     r_pos = np.abs(roi_cfg.roi_x_positions)
     theoretical_vel = np.where(r_pos <= 5, 10 * (1 - (r_pos/5)**2), 0)
