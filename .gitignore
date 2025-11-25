@@ -1,0 +1,33 @@
+# MATLAB files
+*.asv
+*.m~
+*.mex*
+*.mat
+*.fig
+*.p
+*.slx.autosave
+
+# Data directory
+data/
+
+# Video files
+*.avi
+*.mp4
+*.mov
+
+# Results and outputs
+*_results.mat
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+*.sublime-*
+.idea/
+
+# Temporary files
+*.tmp
+*~
