@@ -1,5 +1,4 @@
 import numpy as np
-import matlab.engine
 import os
 from src.setting import *
 from src.phantom import generate_vessel_phantom, update_scatterer_positions
@@ -14,9 +13,8 @@ def main():
     output_dir = 'results'
     os.makedirs(output_dir, exist_ok=True)
 
-    print("初始化 MATLAB Engine 與 Field II...")
-    eng = matlab.engine.start_matlab()
-    init_field_ii(eng)
+    print("初始化模擬環境...")
+    sim_config = init_simulation()
 
     trans_cfg = TransducerConfig()
     psf_cfg = PSFConfig()
@@ -135,8 +133,7 @@ def main():
                  std_velocities=std_vel,
                  all_roi_cc=all_roi_cc)
 
-    cleanup_field_ii(eng)
-    eng.quit()
+    cleanup_simulation()
     print("\n模擬完成!")
 
 if __name__ == '__main__':

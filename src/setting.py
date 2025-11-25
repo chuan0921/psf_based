@@ -42,12 +42,25 @@ class SimulationConfig:
     num_iterations = 1
     dt = 1/100
 
-def init_field_ii(matlab_engine):
-    matlab_engine.addpath('/Users/dorishsu/Documents/MATLAB/m_files', nargout=0)
-    matlab_engine.field_init(nargout=0)
+def init_simulation():
+    """
+    初始化超音波模擬環境（純 Python 實現）
+    不再需要 MATLAB 或 Field II
+    """
+    print("Initializing Python-based ultrasound simulation...")
+    # 設定基本參數
+    config = {
+        'fs': 100e6,  # 採樣頻率 100 MHz
+        'initialized': True
+    }
+    return config
 
-def cleanup_field_ii(matlab_engine):
-    matlab_engine.field_end(nargout=0)
+def cleanup_simulation():
+    """
+    清理模擬環境（純 Python 實現）
+    """
+    print("Cleaning up simulation...")
+    pass
 
 def calculate_element_centers(element_data, N_elements):
     element_centers = np.zeros((N_elements, 3))
