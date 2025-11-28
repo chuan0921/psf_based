@@ -14,11 +14,11 @@ from tqdm import tqdm
 from src.setting import *
 
 cp.cuda.Device(GPU_ID).use()
-from src.phantom import generate_vessel_phantom, update_scatterer_positions
+from src.phantom import generate_vessel_phantom, update_scatterer_positions, check_and_regenerate_scatterers
 from src.speckle_image import calculate_psf_parameters, generate_ultrasound_image, apply_envelope_detection
 from src.grid import create_spatial_grid, create_roi_masks
 from src.correlation import compute_multi_roi_ncc
-from src.velocity_estimation import estimate_velocities_batch
+from src.velocity_estimation import estimate_velocities_batch, estimate_velocity_unified
 from src.visualization import plot_velocity_profile, plot_rayleigh_distribution, create_animation, save_bmode_image
 from src.statistics import generate_statistics_report, save_results
 
@@ -37,6 +37,14 @@ def main():
     grid_cfg = GridConfig()
     roi_cfg = ROIConfig()
     sim_cfg = SimulationConfig()
+    flow_cfg = FlowConfig()  # 新增：3D 流動配置
+    track_cfg = SpeckleTrackingConfig()  # 新增：Speckle tracking 配置
+
+    print(f"\n流動配置:")
+    print(f"  模式: {flow_cfg.velocity_estimation_mode}")
+    print(f"  流動方向: {flow_cfg.flow_direction}")
+    print(f"  最大速度: {flow_cfg.max_velocity} mm/s")
+    print(f"  血管半徑: {flow_cfg.vessel_radius} mm")
 
     element_centers = calculate_element_centers(trans_cfg.element_data, trans_cfg.N_elements)
     y_distance = calculate_elevational_pitch(element_centers)
@@ -63,9 +71,14 @@ def main():
         tqdm.write(f"Iteration {iter_idx+1}/{sim_cfg.num_iterations}")
         tqdm.write(f"{'='*50}")
 
-        x_sc, y_sc, z_sc, amps, v_profile = generate_vessel_phantom(
-            sim_cfg.num_scatterers, grid_cfg.x_size, 5, grid_cfg.z_size,
-            roi_cfg.vessel_cx, roi_cfg.vessel_cz, 5, 10
+        # 使用新的 3D phantom 生成
+        x_sc, y_sc, z_sc, amps, v_profile, flow_dir = generate_vessel_phantom(
+            sim_cfg.num_scatterers,
+            grid_cfg.x_size, flow_cfg.vessel_length_y, grid_cfg.z_size,
+            roi_cfg.vessel_cx, roi_cfg.vessel_cz,
+            flow_cfg.vessel_radius, flow_cfg.max_velocity,
+            flow_direction=flow_cfg.flow_direction,
+            vessel_cy=0.0
         )
 
         print("生成參考影像...")
@@ -84,7 +97,22 @@ def main():
         frame_cc_values = []
 
         for frame_idx in tqdm(range(sim_cfg.num_frames), desc="  Frames", unit="frame", leave=False):
-            y_sc = update_scatterer_positions(y_sc, v_profile, sim_cfg.dt)
+            # 使用新的 3D 位置更新
+            x_sc, y_sc, z_sc = update_scatterer_positions(
+                x_sc, y_sc, z_sc, v_profile, flow_dir, sim_cfg.dt
+            )
+
+            # 散射體重生（如果啟用）
+            if flow_cfg.enable_scatterer_regeneration:
+                x_sc, y_sc, z_sc, amps, num_regen = check_and_regenerate_scatterers(
+                    x_sc, y_sc, z_sc, amps,
+                    grid_cfg.x_size, flow_cfg.vessel_length_y, grid_cfg.z_size,
+                    roi_cfg.vessel_cx, 0.0, roi_cfg.vessel_cz,
+                    flow_cfg.vessel_radius, flow_dir,
+                    boundary_margin=flow_cfg.boundary_margin
+                )
+                if num_regen > 0 and frame_idx % 10 == 0:
+                    tqdm.write(f"    Frame {frame_idx}: 重生 {num_regen} 個散射體")
 
             moving_rf = generate_ultrasound_image(
                 X, Z, x_sc, y_sc, z_sc, amps,
@@ -107,20 +135,44 @@ def main():
             tqdm.write(f"\nMax CC at frame {max_cc_frame_idx}: {frame_cc_values[max_cc_frame_idx]:.3f}")
 
     print("\n速度估算...")
+
+    # 計算理論速度（基於 3D 流動）
+    # 計算每個 ROI 位置到血管軸線的徑向距離
+    theoretical_vel = []
+    for x_pos in roi_cfg.roi_x_positions:
+        # ROI 位置（假設在血管中心 Z 位置）
+        dx = x_pos - roi_cfg.vessel_cx
+        dy = 0 - 0  # vessel_cy = 0
+        dz = roi_cfg.vessel_cz - roi_cfg.vessel_cz  # 0
+        pos_vec = np.array([dx, dy, dz])
+
+        # 投影到流動方向
+        proj = np.dot(pos_vec, flow_dir) * flow_dir
+        perp = pos_vec - proj
+        r = np.linalg.norm(perp)
+
+        # Poiseuille 速度剖面
+        theo_speed = flow_cfg.max_velocity * (1 - (r / flow_cfg.vessel_radius)**2) \
+                     if r <= flow_cfg.vessel_radius else 0
+        theoretical_vel.append(theo_speed)
+
+    theoretical_vel = np.array(theoretical_vel)
+
+    # 速度估算（保持現有的 Y 方向方法）
     measured_velocities = estimate_velocities_batch(all_roi_cc, sim_cfg.dt, y_distance)
 
     # 使用 nanmean/nanstd 忽略無效的速度估算
     avg_vel = np.nanmean(measured_velocities, axis=1)
     std_vel = np.nanstd(measured_velocities, axis=1)
 
-    r_pos = np.abs(roi_cfg.roi_x_positions)
-    theoretical_vel = np.where(r_pos <= 5, 10 * (1 - (r_pos/5)**2), 0)
-
     report = generate_statistics_report(roi_cfg.roi_x_positions, theoretical_vel,
-                                       avg_vel, std_vel, 5, 10, sim_cfg.num_iterations)
+                                       avg_vel, std_vel,
+                                       flow_cfg.vessel_radius, flow_cfg.max_velocity,
+                                       sim_cfg.num_iterations)
     print("\n" + report)
 
-    plot_velocity_profile(roi_cfg.roi_x_positions, theoretical_vel, avg_vel, std_vel, 5, 10)
+    plot_velocity_profile(roi_cfg.roi_x_positions, theoretical_vel, avg_vel, std_vel,
+                         flow_cfg.vessel_radius, flow_cfg.max_velocity)
 
     if saved_ref_image is not None:
         print("\n儲存影像...")
@@ -136,7 +188,8 @@ def main():
     if animation_frames:
         print("\n建立動畫...")
         create_animation(animation_frames, x, z,
-                        {'cx': roi_cfg.vessel_cx, 'cz': roi_cfg.vessel_cz, 'R': 5},
+                        {'cx': roi_cfg.vessel_cx, 'cz': roi_cfg.vessel_cz,
+                         'R': flow_cfg.vessel_radius},
                         {}, os.path.join(output_dir, 'flow_simulation.gif'))
 
     save_results(os.path.join(output_dir, 'results.npz'),
