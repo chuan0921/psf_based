@@ -1,0 +1,45 @@
+================================================================================
+VELOCITY ESTIMATION ERROR ANALYSIS
+================================================================================
+
+CONFIGURATION:
+  Vessel Radius (R):     5.00 mm
+  Maximum Velocity:      120.0 mm/s
+  Flow Direction:        [0.707, 0.000, 0.707]
+
+SAMPLE STATISTICS:
+  Valid IWs (inside vessel): 135
+  Total IWs inside vessel:   138
+
+================================================================================
+ERROR METRICS
+================================================================================
+
+VELOCITY MAGNITUDE |v|:
+----------------------------------------
+  RMSE:           69.77 mm/s
+  NRMSE:          58.14% (of Vmax)
+  MAE:            60.63 mm/s
+  Max Error:      119.40 mm/s
+  R-squared:      -3.0762
+
+X-COMPONENT vx (flow_dir_x = 0.707):
+----------------------------------------
+  RMSE:           49.45 mm/s
+  NRMSE:          58.28%
+  MAE:            42.97 mm/s
+  Max Error:      84.43 mm/s
+
+Z-COMPONENT vz (flow_dir_z = 0.707):
+----------------------------------------
+  RMSE:           49.39 mm/s
+  NRMSE:          58.21%
+  MAE:            42.93 mm/s
+  Max Error:      84.43 mm/s
+
+RELATIVE ERROR STATISTICS:
+----------------------------------------
+  Mean Relative Error:   99.9%
+  Std of Relative Error: 0.6%
+
+================================================================================

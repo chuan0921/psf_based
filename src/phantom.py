@@ -8,9 +8,9 @@ def generate_point_targets(positions, amplitudes=None):
 
 def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
                            vessel_cx, vessel_cz, R, Vmax,
-                           flow_direction=None, vessel_cy=0.0):
+                           flow_direction=None, vessel_axis=None, vessel_cy=0.0):
     """
-    生成 3D 血管 phantom，支援任意方向的流動
+    生成 3D 血管 phantom，支援分離的血管幾何與流動方向
 
     Parameters:
     -----------
@@ -25,8 +25,11 @@ def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
     Vmax : float
         中心最大速度 (mm/s)
     flow_direction : ndarray (3,), optional
-        流動方向單位向量 [vx, vy, vz]
-        如果為 None，預設為 [0, 1, 0] (Y 方向，向後兼容)
+        流動方向單位向量 [vx, vy, vz]，控制散射體移動方向
+        如果為 None，預設為 [0, 1, 0] (Y 方向)
+    vessel_axis : ndarray (3,), optional
+        血管軸線方向 [ax, ay, az]，控制血管幾何形狀
+        如果為 None，與 flow_direction 相同（向後兼容）
     vessel_cy : float, optional
         血管中心 Y 座標 (mm)，預設為 0.0
 
@@ -41,6 +44,17 @@ def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
     flow_direction_normalized : ndarray (3,)
         正規化後的流動方向向量
     """
+    # 0. 處理預設參數
+    if flow_direction is None:
+        flow_direction = np.array([0.0, 1.0, 0.0])  # 預設 Y 方向
+    flow_direction_normalized = flow_direction / np.linalg.norm(flow_direction)
+
+    # 如果 vessel_axis 為 None，使用 flow_direction（向後兼容）
+    if vessel_axis is None:
+        vessel_axis = flow_direction_normalized.copy()
+    else:
+        vessel_axis = vessel_axis / np.linalg.norm(vessel_axis)
+
     # 1. 生成散射體位置（只在血管內）
     # 使用拒絕採樣法：生成隨機點，只保留在血管內的
     x_scatter = []
@@ -59,21 +73,15 @@ def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
         y_candidates = y_size * np.random.rand(batch_size) - y_size/2
         z_candidates = z_size * np.random.rand(batch_size)
 
-        # 檢查哪些點在血管內
+        # 檢查哪些點在血管內（使用 vessel_axis 決定血管形狀）
         dx = x_candidates - vessel_cx
         dy = y_candidates - vessel_cy
         dz = z_candidates - vessel_cz
         pos_vecs = np.column_stack([dx, dy, dz])
 
-        # 計算流動方向（暫時用預設值）
-        if flow_direction is None:
-            temp_flow_dir = np.array([0.0, 1.0, 0.0])
-        else:
-            temp_flow_dir = flow_direction / np.linalg.norm(flow_direction)
-
-        # 計算到血管軸線的徑向距離
-        proj_length = np.dot(pos_vecs, temp_flow_dir)
-        proj_vecs = proj_length[:, np.newaxis] * temp_flow_dir
+        # 計算到血管軸線的徑向距離（使用 vessel_axis）
+        proj_length = np.dot(pos_vecs, vessel_axis)
+        proj_vecs = proj_length[:, np.newaxis] * vessel_axis
         perp_vecs = pos_vecs - proj_vecs
         r = np.linalg.norm(perp_vecs, axis=1)
 
@@ -98,25 +106,18 @@ def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
     if len(x_scatter) < num_scatterers:
         print(f"警告: 只生成了 {len(x_scatter)}/{num_scatterers} 個散射體在血管內")
 
-    # 2. 處理流動方向
-    if flow_direction is None:
-        flow_direction = np.array([0.0, 1.0, 0.0])  # 預設 Y 方向
-
-    # 正規化流動方向
-    flow_direction_normalized = flow_direction / np.linalg.norm(flow_direction)
-
-    # 3. 計算到血管軸線的徑向距離
-    # 血管軸線: 通過 (vessel_cx, vessel_cy, vessel_cz) 沿著 flow_direction 的直線
+    # 2. 計算到血管軸線的徑向距離（用於 Poiseuille profile）
+    # 血管軸線: 通過 (vessel_cx, vessel_cy, vessel_cz) 沿著 vessel_axis 的直線
     dx = x_scatter - vessel_cx
     dy = y_scatter - vessel_cy
     dz = z_scatter - vessel_cz
     pos_vectors = np.column_stack([dx, dy, dz])  # (N, 3)
 
-    # 投影到流動方向的長度
-    proj_length = np.dot(pos_vectors, flow_direction_normalized)  # (N,)
+    # 投影到血管軸線方向的長度
+    proj_length = np.dot(pos_vectors, vessel_axis)  # (N,)
 
     # 投影向量
-    proj_vectors = proj_length[:, np.newaxis] * flow_direction_normalized  # (N, 3)
+    proj_vectors = proj_length[:, np.newaxis] * vessel_axis  # (N, 3)
 
     # 垂直距離向量 = 總向量 - 投影向量
     perp_vectors = pos_vectors - proj_vectors
@@ -124,8 +125,8 @@ def generate_vessel_phantom(num_scatterers, x_size, y_size, z_size,
     # 到軸線的徑向距離
     r = np.linalg.norm(perp_vectors, axis=1)  # (N,)
 
-    # 4. 計算 Poiseuille 速度剖面
-    # 因為所有散射體都在血管內，所有速度都不為 0
+    # 3. 計算 Poiseuille 速度剖面
+    # 速度大小基於到血管軸線的距離，但移動方向由 flow_direction 決定
     v_profile = Vmax * (1 - (r / R)**2)
 
     return x_scatter, y_scatter, z_scatter, amplitudes, v_profile, flow_direction_normalized
@@ -169,7 +170,7 @@ def update_scatterer_positions(x_scatter, y_scatter, z_scatter,
 def check_and_regenerate_scatterers(x_scatter, y_scatter, z_scatter, amplitudes,
                                    x_size, y_size, z_size,
                                    vessel_cx, vessel_cy, vessel_cz, R,
-                                   flow_direction, boundary_margin=0.5):
+                                   flow_direction, vessel_axis=None, boundary_margin=0.5):
     """
     檢測離開邊界的散射體並在血管內重新生成
 
@@ -187,6 +188,9 @@ def check_and_regenerate_scatterers(x_scatter, y_scatter, z_scatter, amplitudes,
         血管半徑 (mm)
     flow_direction : ndarray (3,)
         流動方向單位向量
+    vessel_axis : ndarray (3,), optional
+        血管軸線方向，控制血管幾何形狀
+        如果為 None，使用 flow_direction（向後兼容）
     boundary_margin : float
         邊界容差 (mm)
 
@@ -199,6 +203,12 @@ def check_and_regenerate_scatterers(x_scatter, y_scatter, z_scatter, amplitudes,
     num_regenerated : int
         重生的散射體數量
     """
+    # 如果 vessel_axis 為 None，使用 flow_direction（向後兼容）
+    if vessel_axis is None:
+        vessel_axis = flow_direction / np.linalg.norm(flow_direction)
+    else:
+        vessel_axis = vessel_axis / np.linalg.norm(vessel_axis)
+
     # 1. 檢測邊界
     x_min, x_max = -x_size/2 - boundary_margin, x_size/2 + boundary_margin
     y_min, y_max = -y_size/2 - boundary_margin, y_size/2 + boundary_margin
@@ -224,11 +234,11 @@ def check_and_regenerate_scatterers(x_scatter, y_scatter, z_scatter, amplitudes,
             y_new = y_size * np.random.rand() - y_size/2
             z_new = z_size * np.random.rand()
 
-            # 檢查是否在血管內
+            # 檢查是否在血管內（使用 vessel_axis）
             dx, dy, dz = x_new - vessel_cx, y_new - vessel_cy, z_new - vessel_cz
             pos_vec = np.array([dx, dy, dz])
-            proj_length = np.dot(pos_vec, flow_direction)
-            proj_vec = proj_length * flow_direction
+            proj_length = np.dot(pos_vec, vessel_axis)
+            proj_vec = proj_length * vessel_axis
             perp_vec = pos_vec - proj_vec
             r = np.linalg.norm(perp_vec)
 

@@ -177,7 +177,7 @@ def compute_axial_displacement_1d(ref_image, mov_image, roi_mask,
 def estimate_displacements_batch_xz(ref_image, mov_image, roi_masks,
                                    search_range_x, search_range_z,
                                    search_step_x, search_step_z,
-                                   x_grid, z_grid, ncc_threshold=0.3):
+                                   x_grid, z_grid, ncc_threshold=0.6):
     """
     批次估算多個 ROI 的 X-Z 位移
 
@@ -230,3 +230,67 @@ def estimate_displacements_batch_xz(ref_image, mov_image, roi_masks,
         ncc_values[i] = [ncc_x, ncc_z]
 
     return displacements, ncc_values
+
+def create_iw_results(iw_info, displacements, ncc_values, velocities, dt):
+    """
+    Package IW grid results with metadata.
+
+    Parameters:
+    -----------
+    iw_info : list of dict
+        IW grid metadata from create_iw_grid()
+    displacements : ndarray (N, 2)
+        [dx, dz] in mm
+    ncc_values : ndarray (N, 2)
+        [ncc_x, ncc_z]
+    velocities : ndarray (N, 2)
+        [vx, vz] in mm/s
+    dt : float
+        Time interval (s)
+
+    Returns:
+    --------
+    results : list of dict
+        Per-IW results with metadata
+    """
+    results = []
+
+    for i, iw in enumerate(iw_info):
+        dx, dz = displacements[i]
+        ncc_x, ncc_z = ncc_values[i]
+        vx, vz = velocities[i]
+
+        # Validity flags (NCC >= 0.6)
+        valid_x = not np.isnan(dx) and ncc_x >= 0.6
+        valid_z = not np.isnan(dz) and ncc_z >= 0.6
+
+        results.append({
+            # Position
+            'cx': iw['cx'],
+            'cz': iw['cz'],
+            'index': iw['index'],
+
+            # Geometry
+            'inside_vessel': iw['inside_vessel'],
+            'vessel_overlap': iw['vessel_overlap'],
+
+            # Displacement
+            'dx': dx,
+            'dz': dz,
+            'displacement_mag': np.sqrt(dx**2 + dz**2) if valid_x and valid_z else np.nan,
+
+            # Velocity
+            'vx': vx,
+            'vz': vz,
+            'velocity_mag': np.sqrt(vx**2 + vz**2) if valid_x and valid_z else np.nan,
+
+            # Quality
+            'ncc_x': ncc_x,
+            'ncc_z': ncc_z,
+            'ncc_mean': (ncc_x + ncc_z) / 2,
+            'valid_x': valid_x,
+            'valid_z': valid_z,
+            'valid': valid_x and valid_z
+        })
+
+    return results
