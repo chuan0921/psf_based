@@ -18,12 +18,13 @@ cp.cuda.Device(GPU_ID).use()
 from src.phantom import generate_vessel_phantom, update_scatterer_positions, check_and_regenerate_scatterers
 from src.speckle_image import calculate_psf_parameters, generate_ultrasound_image, apply_envelope_detection
 from src.grid import create_spatial_grid, create_roi_masks, create_iw_grid, extract_iw_masks, validate_iw_grid, print_iw_validation_report
-from src.correlation import compute_multi_roi_ncc, create_iw_results
+from src.correlation import compute_multi_roi_ncc, create_iw_results, estimate_x_displacement_batch
 from src.velocity_estimation import estimate_velocities_batch, estimate_velocity_unified
-from src.visualization import (plot_velocity_profile, plot_rayleigh_distribution,
-                               create_animation, save_bmode_image,
-                               plot_velocity_vector_field, plot_velocity_profile_comparison,
-                               plot_iw_boundaries, plot_ncc_curves, plot_peak_frame_distribution)
+from src.visualization import (plot_rayleigh_distribution,
+                               plot_velocity_vector_field,
+                               plot_ncc_curves, plot_peak_frame_distribution,
+                               save_combined_bmode_images, save_combined_velocity_profiles,
+                               create_ncc_tracking_animation)
 from src.statistics import (generate_statistics_report, save_results,
                             compute_iw_error_metrics, generate_iw_error_report)
 
@@ -103,13 +104,11 @@ def main():
     num_iw = len(iw_info)
     num_frames = sim_cfg.num_frames
 
-    # === 新增：儲存逐幀 NCC 和位移的陣列 ===
+    # === X-only tracking：儲存逐幀 NCC 和 X 位移 ===
     # Shape: (num_iw, num_frames)
-    all_ncc_x = np.zeros((num_iw, num_frames))      # X 方向 NCC
-    all_ncc_z = np.zeros((num_iw, num_frames))      # Z 方向 NCC
-    all_ncc_mean = np.zeros((num_iw, num_frames))   # 平均 NCC (用於找峰值)
-    all_dx = np.zeros((num_iw, num_frames))         # X 方向位移 (mm)
-    all_dz = np.zeros((num_iw, num_frames))         # Z 方向位移 (mm)
+    # 注意：使用參考幀比較模式 (frame n vs frame 0)
+    all_ncc = np.zeros((num_iw, num_frames))        # NCC 值
+    all_dx = np.zeros((num_iw, num_frames))         # X 方向累積位移 (mm)
 
     animation_frames = []
     saved_ref_image = None
@@ -132,10 +131,10 @@ def main():
             vessel_cy=0.0
         )
 
-        print("生成參考影像...")
+        print("生成參考影像 (左1 TX+RX)...")
         ref_rf = generate_ultrasound_image(
             X, Z, x_sc, y_sc, z_sc, amps,
-            element_centers, [0], [0],
+            element_centers, [0], [0],  # 元件 0 (左1)
             trans_cfg.fx, trans_cfg.c, sigma_x, sigma_z, sigma_y, psf_cfg.p_comp
         )
         ref_image = apply_envelope_detection(ref_rf)
@@ -164,85 +163,105 @@ def main():
                 if num_regen > 0 and frame_idx % 10 == 0:
                     tqdm.write(f"    Frame {frame_idx}: 重生 {num_regen} 個散射體")
 
+            # === 雙元件 X-only Tracking: 左1(ref) vs 左2(moving) ===
             moving_rf = generate_ultrasound_image(
                 X, Z, x_sc, y_sc, z_sc, amps,
-                element_centers, [1], [1],
+                element_centers, [2], [2],  # 元件 2 (左2)
                 trans_cfg.fx, trans_cfg.c, sigma_x, sigma_z, sigma_y, psf_cfg.p_comp
             )
             moving_image = apply_envelope_detection(moving_rf)
 
-            # 使用 IW 網格進行 X-Z 位移估算（每幀都跟參考幀比較）
-            result = estimate_velocity_unified(
-                ref_image, moving_image, sim_cfg.dt,
-                mode='xz',
-                roi_masks=iw_masks,
-                search_range_x=iw_cfg.search_range_x,
-                search_range_z=iw_cfg.search_range_z,
-                search_step_x=iw_cfg.search_step_x,
-                search_step_z=iw_cfg.search_step_z,
-                x_grid=x, z_grid=z,
-                ncc_threshold=0.0  # 暫時不過濾，儲存所有 NCC 值
-            )
-
-            # === 儲存逐幀結果 ===
+            # === X-only 參考幀追蹤: 比較 frame n 與 frame 0 (ref) ===
+            # 累積位移會隨時間增加，搜尋範圍需要夠大
             if iter_idx == 0:
-                # 儲存 NCC 值
-                all_ncc_x[:, frame_idx] = result['ncc'][:, 0]
-                all_ncc_z[:, frame_idx] = result['ncc'][:, 1]
-                all_ncc_mean[:, frame_idx] = (result['ncc'][:, 0] + result['ncc'][:, 1]) / 2
+                # 只計算 X 方向位移
+                dx_frame, ncc_frame = estimate_x_displacement_batch(
+                    ref_image, moving_image, iw_masks,
+                    iw_cfg.search_range_x, iw_cfg.search_step_x, x
+                )
 
-                # 儲存位移值
-                all_dx[:, frame_idx] = result['displacements'][:, 0]
-                all_dz[:, frame_idx] = result['displacements'][:, 1]
+                # 儲存結果
+                all_ncc[:, frame_idx] = ncc_frame
+                all_dx[:, frame_idx] = dx_frame
 
                 animation_frames.append(moving_image.copy())
 
-        # === 找峰值幀並計算速度 ===
+        # === X-only Tracking: 使用 last valid frame 計算速度 ===
         if iter_idx == 0:
-            tqdm.write(f"\n找尋每個 IW 的 NCC 峰值幀...")
+            tqdm.write(f"\nX-only Tracking: 計算速度 (last valid frame 方法)...")
 
-            # 對每個 IW 找到 NCC 最大的幀
-            peak_frames = np.argmax(all_ncc_mean, axis=1)  # Shape: (num_iw,)
+            ncc_threshold = iw_cfg.ncc_threshold
 
-            # 提取峰值幀的數據
-            final_dx = np.array([all_dx[i, peak_frames[i]] for i in range(num_iw)])
-            final_dz = np.array([all_dz[i, peak_frames[i]] for i in range(num_iw)])
-            final_ncc_x = np.array([all_ncc_x[i, peak_frames[i]] for i in range(num_iw)])
-            final_ncc_z = np.array([all_ncc_z[i, peak_frames[i]] for i in range(num_iw)])
-            final_ncc_mean = np.array([all_ncc_mean[i, peak_frames[i]] for i in range(num_iw)])
+            # 對每個 IW，找到最後一個有效幀（NCC >= threshold）
+            # 然後用 vx = dx[last_valid] / (last_valid_frame × dt)
+            last_valid_frame = np.zeros(num_iw, dtype=int)
+            final_dx = np.zeros(num_iw)
+            final_ncc = np.zeros(num_iw)
+            final_vx = np.zeros(num_iw)
 
-            # 計算到達峰值的時間 (幀數從1開始計算，因為 frame 0 表示 dt 已經過了)
-            time_to_peak = (peak_frames + 1) * sim_cfg.dt  # +1 因為 frame 0 已經經過 dt 時間
+            for i in range(num_iw):
+                # 找到所有有效幀（NCC >= threshold）
+                valid_frames = np.where(all_ncc[i, :] >= ncc_threshold)[0]
 
-            # 計算速度 = 位移 / 時間
-            final_vx = final_dx / time_to_peak
-            final_vz = final_dz / time_to_peak
-            final_v_mag = np.sqrt(final_vx**2 + final_vz**2)
+                if len(valid_frames) > 0:
+                    # 取最後一個有效幀
+                    last_valid = valid_frames[-1]
+                    last_valid_frame[i] = last_valid
+                    final_dx[i] = all_dx[i, last_valid]
+                    final_ncc[i] = all_ncc[i, last_valid]
+
+                    # 計算速度: vx = dx / time
+                    # time = (frame_idx + 1) × dt，因為 frame 0 是在 1×dt 之後
+                    time_elapsed = (last_valid + 1) * sim_cfg.dt
+                    final_vx[i] = final_dx[i] / time_elapsed
+                else:
+                    # 沒有有效幀
+                    last_valid_frame[i] = -1
+                    final_dx[i] = np.nan
+                    final_ncc[i] = np.nan
+                    final_vx[i] = np.nan
 
             # 有效性判斷
-            ncc_threshold = iw_cfg.ncc_threshold
-            valid_mask = (final_ncc_mean >= ncc_threshold) & (peak_frames > 0)
+            valid_mask = last_valid_frame >= 0
 
-            # 找全域最大 NCC 幀
-            global_avg_ncc = np.mean(all_ncc_mean, axis=0)
+            # 統計
+            valid_frames_per_iw = np.sum(all_ncc >= ncc_threshold, axis=1)
+
+            # 為相容性，設定 final_vz = 0（只追蹤 X）
+            final_vz = np.zeros(num_iw)
+            final_v_mag = np.abs(final_vx)
+
+            # 為相容性，保留一些變數名稱
+            final_ncc_mean = final_ncc
+            final_ncc_x = final_ncc
+            final_ncc_z = np.zeros(num_iw)
+            peak_frames = last_valid_frame
+            frame_times = (np.arange(num_frames) + 1) * sim_cfg.dt
+            time_to_peak = (last_valid_frame + 1) * sim_cfg.dt
+
+            # 找全域最大 NCC 幀（用於視覺化）
+            global_avg_ncc = np.mean(all_ncc, axis=0)
             max_cc_frame_idx = np.argmax(global_avg_ncc)
             saved_matched_image = animation_frames[max_cc_frame_idx].copy()
 
-            tqdm.write(f"峰值幀統計:")
+            tqdm.write(f"速度計算統計:")
+            tqdm.write(f"  方法: 雙元件 (左1 vs 左2) + Last Valid Frame")
+            tqdm.write(f"  NCC 閾值: {ncc_threshold}")
+            tqdm.write(f"  有效 IW 數: {np.sum(valid_mask)}/{num_iw}")
+            tqdm.write(f"  平均最後有效幀: {np.mean(last_valid_frame[valid_mask]):.1f}")
+            tqdm.write(f"  平均有效幀數: {np.mean(valid_frames_per_iw):.1f}")
             tqdm.write(f"  全域最大 NCC 幀: {max_cc_frame_idx} (NCC={global_avg_ncc[max_cc_frame_idx]:.3f})")
-            tqdm.write(f"  峰值幀範圍: [{np.min(peak_frames)}, {np.max(peak_frames)}]")
-            tqdm.write(f"  峰值幀平均: {np.mean(peak_frames):.1f}")
 
     print("\n速度估算與統計...")
 
-    # 分析 IW 結果（使用峰值幀法計算的速度）
+    # 分析 IW 結果（X-only tracking + last valid frame）
     if 'final_vx' in dir():
         # 計算統計量
         valid_count = np.sum(valid_mask)
         total_count = num_iw
         valid_ratio = valid_count / total_count if total_count > 0 else 0
 
-        print(f"\nIW 品質統計 (峰值幀法):")
+        print(f"\nIW 品質統計 (雙元件: 左1 vs 左2):")
         print(f"  總 IW 數: {total_count}")
         print(f"  有效 IW 數: {valid_count}")
         print(f"  有效率: {valid_ratio:.1%}")
@@ -255,12 +274,12 @@ def main():
             print(f"  速度範圍: [{np.min(valid_velocities):.2f}, {np.max(valid_velocities):.2f}] mm/s")
             print(f"  標準差: {np.std(valid_velocities):.2f} mm/s")
 
-        # 峰值幀統計
-        valid_peak_frames = peak_frames[valid_mask]
-        if len(valid_peak_frames) > 0:
-            print(f"\n峰值幀統計 (有效 IWs):")
-            print(f"  峰值幀平均: {np.mean(valid_peak_frames):.1f}")
-            print(f"  峰值幀範圍: [{np.min(valid_peak_frames)}, {np.max(valid_peak_frames)}]")
+        # 有效幀統計
+        valid_frame_counts = valid_frames_per_iw[valid_mask]
+        if len(valid_frame_counts) > 0:
+            print(f"\n有效幀統計 (有效 IWs):")
+            print(f"  每 IW 有效幀數平均: {np.mean(valid_frame_counts):.1f}")
+            print(f"  有效幀數範圍: [{np.min(valid_frame_counts)}, {np.max(valid_frame_counts)}]")
 
         # 儲存詳細 IW 結果
         print(f"\n儲存 IW 結果到 {output_dir}/iw_results.npz...")
@@ -272,21 +291,25 @@ def main():
             # 位置與幾何
             iw_positions=iw_positions,
             iw_overlap=iw_overlaps,
-            # 峰值幀數據
-            peak_frames=peak_frames,
-            time_to_peak=time_to_peak,
-            # 最終速度
+            # 最終速度 (X-only, last valid frame)
             iw_velocities=np.stack([final_vx, final_vz], axis=1),
             iw_velocity_mag=final_v_mag,
+            final_vx=final_vx,
+            final_dx=final_dx,
             # 最終 NCC
-            iw_ncc=np.stack([final_ncc_x, final_ncc_z], axis=1),
             iw_ncc_mean=final_ncc_mean,
+            final_ncc=final_ncc,
             # 有效性
             iw_valid=valid_mask,
-            # 完整逐幀數據
-            all_ncc_mean=all_ncc_mean,
+            valid_frames_per_iw=valid_frames_per_iw,
+            last_valid_frame=last_valid_frame,
+            # 逐幀數據 (X-only)
+            all_ncc=all_ncc,
             all_dx=all_dx,
-            all_dz=all_dz
+            frame_times=frame_times,
+            # 相容性欄位 (用於視覺化)
+            peak_frames=peak_frames,
+            time_to_peak=time_to_peak
         )
 
         # =========================================================
@@ -319,31 +342,18 @@ def main():
                 scale_factor=0.02
             )
 
-            # 1.5 IW 邊界視覺化
-            print("1.5 生成 IW 邊界圖...")
-            speckle_info = {
-                'lateral': speckle_lateral,
-                'axial': speckle_axial
-            }
-            plot_iw_boundaries(
-                saved_ref_image, x, z, iw_info, iw_cfg,
-                vessel_params, speckle_info,
-                filename=os.path.join(output_dir, 'iw_boundaries.png'),
-                max_iw_to_show=None  # 顯示所有 IW
-            )
-
-            # 1.6 NCC 曲線圖
-            print("1.6 生成 NCC 曲線圖...")
+            # 1.5 NCC 曲線圖
+            print("1.5 生成 NCC 曲線圖...")
             plot_ncc_curves(
-                all_ncc_mean, peak_frames, iw_positions, valid_mask,
+                all_ncc, peak_frames, iw_positions, valid_mask,
                 vessel_params['cx'], vessel_params['cz'],
                 vessel_params['R'], sim_cfg.dt,
                 filename=os.path.join(output_dir, 'ncc_curves.png'),
                 num_curves=10
             )
 
-            # 1.7 峰值幀分佈圖
-            print("1.7 生成峰值幀分佈圖...")
+            # 1.6 峰值幀分佈圖
+            print("1.6 生成峰值幀分佈圖...")
             plot_peak_frame_distribution(
                 peak_frames, iw_positions, valid_mask,
                 vessel_params['cx'], vessel_params['cz'],
@@ -352,14 +362,45 @@ def main():
                 filename=os.path.join(output_dir, 'peak_frame_distribution.png')
             )
 
-        # 2. 速度剖面比較圖
-        print("2. 生成速度剖面比較圖...")
-        plot_velocity_profile_comparison(
+            # 1.7 NCC Tracking 動畫
+            print("1.7 生成 NCC Tracking 動畫...")
+            search_range_pixels = int(iw_cfg.search_range_x / grid_cfg.dx)
+
+            # 選擇中心 IW（最靠近血管中心的有效 IW）
+            iw_distances_to_center = np.sqrt(
+                (iw_positions[:, 0] - vessel_params['cx'])**2 +
+                (iw_positions[:, 1] - vessel_params['cz'])**2
+            )
+            valid_iw_indices = np.where(valid_mask)[0]
+            center_iw_idx = valid_iw_indices[np.argmin(iw_distances_to_center[valid_mask])]
+
+            # 選擇邊緣 IW（有效 IW 中距離中心最遠的）
+            edge_iw_idx = valid_iw_indices[np.argmax(iw_distances_to_center[valid_mask])]
+
+            # 產生中心 IW 的 NCC tracking 動畫
+            create_ncc_tracking_animation(
+                animation_frames, saved_ref_image, iw_masks[center_iw_idx], center_iw_idx,
+                x, z, search_range_pixels,
+                os.path.join(output_dir, 'ncc_tracking_center_iw.gif'),
+                fps=5, max_frames=50
+            )
+
+            # 產生邊緣 IW 的 NCC tracking 動畫
+            create_ncc_tracking_animation(
+                animation_frames, saved_ref_image, iw_masks[edge_iw_idx], edge_iw_idx,
+                x, z, search_range_pixels,
+                os.path.join(output_dir, 'ncc_tracking_edge_iw.gif'),
+                fps=5, max_frames=50
+            )
+
+        # 2. 組合速度剖面圖（散點圖 + 曲線圖）
+        print("2. 生成組合速度剖面圖...")
+        save_combined_velocity_profiles(
             iw_pos, iw_vel, iw_valid_arr,
             vessel_params['cx'], vessel_params['cz'],
             vessel_params['R'], vessel_params['Vmax'],
             flow_cfg.flow_direction,
-            filename=os.path.join(output_dir, 'velocity_profile_comparison.png')
+            filename=os.path.join(output_dir, 'combined_velocity_profiles.png')
         )
 
         # 3. 誤差分析
@@ -398,23 +439,14 @@ def main():
         )
         print(f"誤差指標已儲存至: {output_dir}/error_metrics.npz")
 
-    if saved_ref_image is not None:
-        print("\n儲存影像...")
-        save_bmode_image(saved_ref_image, x, z,
-                        os.path.join(output_dir, 'reference_image.png'),
-                        'Reference Image (Frame 0)')
-
-    if saved_matched_image is not None:
-        save_bmode_image(saved_matched_image, x, z,
-                        os.path.join(output_dir, f'matched_image_frame{max_cc_frame_idx}.png'),
-                        f'Best Matched Image (Frame {max_cc_frame_idx}, Max CC)')
-
-    if animation_frames:
-        print("\n建立動畫...")
-        create_animation(animation_frames, x, z,
-                        {'cx': roi_cfg.vessel_cx, 'cz': roi_cfg.vessel_cz,
-                         'R': flow_cfg.vessel_radius},
-                        {}, os.path.join(output_dir, 'flow_simulation.gif'))
+    # 組合圖：Reference + Matched Image (含 IW 網格)
+    if saved_ref_image is not None and saved_matched_image is not None:
+        print("\n生成組合 B-mode 圖...")
+        save_combined_bmode_images(
+            saved_ref_image, saved_matched_image, x, z,
+            iw_info, iw_cfg, vessel_params, max_cc_frame_idx,
+            filename=os.path.join(output_dir, 'combined_images.png')
+        )
 
     cleanup_simulation()
     print("\n模擬完成!")

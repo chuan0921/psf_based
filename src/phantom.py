@@ -153,7 +153,8 @@ def update_scatterer_positions(x_scatter, y_scatter, z_scatter,
         更新後的座標 (mm)
     """
     # 計算位移量 (mm)
-    displacement = v_profile * dt * 1e-3  # mm/s * s = mm (dt 單位是秒)
+    # v_profile: mm/s, dt: s → v_profile * dt = mm
+    displacement = v_profile * dt
 
     # 3D 位移向量
     dx = displacement * flow_direction[0]

@@ -3,21 +3,55 @@ import numpy as np
 class TransducerConfig:
     fx = 5e6
     c = 1540
-    N_elements = 2
+    N_elements = 4
     gap = 0.01e-3
+    x_kerf = 0.3e-3  # X 方向元件間距 (左1↔左2, 右1↔右2)
+
+    # 4-Element Layout:
+    #   Y (elevational)
+    #   ↑
+    #   │  ┌───┐ ┌───┐
+    #   │  │右1│ │右2│  Y = +1.5mm
+    #   │  │(2)│ │(4)│
+    #   │  └───┘ └───┘
+    #   │     3.01mm (Y kerf)
+    #   │  ┌───┐ ┌───┐
+    #   │  │左1│ │左2│  Y = -1.5mm
+    #   │  │(1)│ │(3)│
+    #   │  └───┘ └───┘
+    #   └─────────────→ X (lateral)
+    #      X1     X2
+    #    -0.155  +0.145
 
     element_data = np.array([
+        # Element 1 (左1): 原始位置
         [1, -0.3e-3 - gap/2, (6e-3+gap)/2 - (2e-3) - gap, 0,
          -0.3e-3 - gap/2, (-6e-3-gap)/2, 0,
          -gap/2, (-6e-3-gap)/2, 0,
          -gap/2, (-6e-3-gap)/2 + (2e-3), 0,
          1, 0.3e-3, 6e-3+gap, 0, 0, 0],
+        # Element 2 (右1): 原始位置
         [2, -0.3e-3 - gap/2, (6e-3+gap)/2, 0,
          -gap/2, (6e-3+gap)/2, 0,
          -gap/2, (-6e-3-gap)/2 + 2e-3 + gap, 0,
          -0.3e-3 - gap/2, (6e-3+gap)/2 - (2e-3), 0,
+         1, 0.3e-3, 6e-3+gap, 0, 0, 0],
+        # Element 3 (左2): 左1 + X 偏移 0.3mm
+        [3, -0.3e-3 - gap/2 + x_kerf, (6e-3+gap)/2 - (2e-3) - gap, 0,
+         -0.3e-3 - gap/2 + x_kerf, (-6e-3-gap)/2, 0,
+         -gap/2 + x_kerf, (-6e-3-gap)/2, 0,
+         -gap/2 + x_kerf, (-6e-3-gap)/2 + (2e-3), 0,
+         1, 0.3e-3, 6e-3+gap, 0, 0, 0],
+        # Element 4 (右2): 右1 + X 偏移 0.3mm
+        [4, -0.3e-3 - gap/2 + x_kerf, (6e-3+gap)/2, 0,
+         -gap/2 + x_kerf, (6e-3+gap)/2, 0,
+         -gap/2 + x_kerf, (-6e-3-gap)/2 + 2e-3 + gap, 0,
+         -0.3e-3 - gap/2 + x_kerf, (6e-3+gap)/2 - (2e-3), 0,
          1, 0.3e-3, 6e-3+gap, 0, 0, 0]
     ])
+
+    # Element name mapping
+    ELEMENT_NAMES = {1: '左1', 2: '右1', 3: '左2', 4: '右2'}
 
 class PSFConfig:
     Fnum = 2
@@ -40,7 +74,7 @@ class SimulationConfig:
     num_scatterers = 8000
     num_frames = 100
     num_iterations = 1
-    dt = 0.003  # 3 ms (333 Hz frame rate) - for max displacement constraint
+    dt = 0.01  # 10 ms (100 Hz frame rate)
 
 class FlowConfig:
     """3D 流動配置"""
@@ -48,7 +82,7 @@ class FlowConfig:
     vessel_axis = np.array([0.0, 1.0, 0.0])  # Y 方向 → XZ 影像中顯示圓形切面
 
     # 流動方向向量 (控制散射體移動方向，將自動正規化)
-    flow_direction = np.array([1.0, 0.0, 1.0])  # XZ 方向 (45度) → 測試 XZ speckle tracking
+    flow_direction = np.array([1.0, 0.0, 0.0])  # X 方向 only → 測試 X-only speckle tracking
 
     # 速度估算模式
     velocity_estimation_mode = 'xz'  # 'xz', 'y_only', '3d'
@@ -56,7 +90,7 @@ class FlowConfig:
     # 血管幾何參數
     vessel_radius = 5.0  # mm
     vessel_length_y = 20.0  # mm, Y 方向血管長度
-    max_velocity = 120.0  # mm/s, 中心最大速度 (increased for realistic flow)
+    max_velocity = 10.0  # mm/s, 中心最大速度
 
     # 散射體重生參數
     enable_scatterer_regeneration = True
@@ -99,15 +133,15 @@ class InterrogationWindowConfig:
     coverage_margin = 0.5  # mm, extra margin beyond vessel radius
 
     # Quality control
-    ncc_threshold = 0.6  # Below this = invalid vector
+    ncc_threshold = 0.7  # Below this = decorrelation (raised to avoid false peaks)
     min_pixels_per_iw = 50  # Minimum pixels for valid IW
 
-    # Search parameters for correlation
-    # Max displacement = max_velocity * dt = 120 mm/s * 0.003 s = 0.36 mm
-    # Use 2x safety margin
-    search_range_x = 0.8  # mm (>2x max displacement)
-    search_range_z = 0.8  # mm
-    search_step_x = 0.05  # mm (subpixel with dx=0.02 mm)
+    # Search parameters for X-only tracking (ref frame comparison)
+    # 累積位移可能很大，需要較大搜尋範圍
+    # 例如：120 mm/s * 0.003s * 15 frames ≈ 5.4 mm
+    search_range_x = 5.0  # mm (支援 ~15 幀累積位移)
+    search_range_z = 0.8  # mm (暫不使用)
+    search_step_x = 0.02  # mm (與 grid dx 相同，精確追蹤)
     search_step_z = 0.05  # mm
 
 def init_simulation():

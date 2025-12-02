@@ -1,5 +1,45 @@
 import numpy as np
 
+
+def gaussian_subpixel_refinement(ncc_values, peak_idx):
+    """
+    Three-point Gaussian peak fitting for sub-pixel accuracy.
+
+    NCC 曲線在峰值附近近似高斯分布，用三個點擬合可獲得 sub-pixel 精度。
+
+    公式：δ = 0.5 × (NCC[i-1] - NCC[i+1]) / (NCC[i-1] - 2×NCC[i] + NCC[i+1])
+
+    Args:
+        ncc_values: NCC values array (1D)
+        peak_idx: Integer index of the peak
+
+    Returns:
+        sub_pixel_position: Refined position (float)
+    """
+    if peak_idx <= 0 or peak_idx >= len(ncc_values) - 1:
+        return float(peak_idx)  # 邊界點無法做 sub-pixel
+
+    y_minus = ncc_values[peak_idx - 1]
+    y_center = ncc_values[peak_idx]
+    y_plus = ncc_values[peak_idx + 1]
+
+    # 確保峰值有效（中心點應該是最大的）
+    if y_center <= y_minus or y_center <= y_plus:
+        return float(peak_idx)
+
+    # 拋物線擬合（等價於高斯對數擬合）
+    denominator = 2 * (y_minus - 2 * y_center + y_plus)
+    if abs(denominator) < 1e-10:
+        return float(peak_idx)
+
+    delta = (y_minus - y_plus) / denominator
+
+    # 限制 delta 在 [-0.5, 0.5] 範圍內（sub-pixel 偏移不應超過半個像素）
+    delta = np.clip(delta, -0.5, 0.5)
+
+    return peak_idx + delta
+
+
 def compute_multi_roi_ncc(ref_image, moving_image, roi_masks):
     num_roi = len(roi_masks)
     roi_cc = np.zeros(num_roi)
@@ -230,6 +270,119 @@ def estimate_displacements_batch_xz(ref_image, mov_image, roi_masks,
         ncc_values[i] = [ncc_x, ncc_z]
 
     return displacements, ncc_values
+
+def estimate_x_displacement_batch(ref_image, mov_image, roi_masks,
+                                   search_range_x, search_step_x, x_grid):
+    """
+    批次估算多個 IW 的 X 方向位移（只追蹤 X，不管 Z）
+
+    做法：Template Matching + Sub-pixel Refinement
+    - ref_patch = 從 ref_image 提取的 IW patch (template)
+    - 在 mov_image 上全域搜索（X 方向），找到 NCC 最高的位置
+    - 使用 Three-Point Gaussian Peak Fitting 獲得 sub-pixel 精度
+    - 位移 = 找到的位置 - 原始 IW 位置
+
+    Parameters:
+    -----------
+    ref_image, mov_image : ndarray (Nz, Nx)
+        參考和移動影像
+    roi_masks : list of ndarray
+        IW masks
+    search_range_x : float
+        X 方向搜尋範圍 (mm)，從原始位置向左右各搜索這麼多
+    search_step_x : float
+        X 方向搜尋步長 (mm)（目前未使用，步長固定為 1 pixel）
+    x_grid : ndarray
+        X 座標軸 (mm)
+
+    Returns:
+    --------
+    dx_array : ndarray (N,)
+        每個 IW 的 X 位移 (mm)，正值 = 向右移動（含 sub-pixel 精度）
+    ncc_array : ndarray (N,)
+        每個 IW 的最大 NCC 值
+    """
+    num_iw = len(roi_masks)
+    dx_array = np.zeros(num_iw)
+    ncc_array = np.zeros(num_iw)
+
+    dx_mm_per_pixel = np.abs(x_grid[1] - x_grid[0])
+    search_range_pixels = int(search_range_x / dx_mm_per_pixel)
+
+    image_width = mov_image.shape[1]
+
+    for i in range(num_iw):
+        mask = roi_masks[i]
+
+        # 找到 mask 的 bounding box（原始 IW 位置）
+        rows = np.any(mask, axis=1)
+        cols = np.any(mask, axis=0)
+        if not rows.any() or not cols.any():
+            dx_array[i] = 0
+            ncc_array[i] = 0
+            continue
+
+        rmin, rmax = np.where(rows)[0][[0, -1]]
+        cmin, cmax = np.where(cols)[0][[0, -1]]
+
+        # Patch 尺寸
+        patch_w = cmax - cmin + 1
+
+        # 提取參考 patch (template)
+        ref_patch = ref_image[rmin:rmax+1, cmin:cmax+1].astype(np.float64)
+
+        # 參考 patch 正規化
+        ref_mean = ref_patch.mean()
+        ref_std = ref_patch.std()
+        if ref_std < 1e-10:
+            dx_array[i] = 0
+            ncc_array[i] = 0
+            continue
+        ref_norm = (ref_patch - ref_mean) / ref_std
+
+        # 全域搜索範圍（在 mov_image 上）
+        # search_x 是 mov_patch 的左邊界（column index）
+        search_start = max(0, cmin - search_range_pixels)
+        search_end = min(image_width - patch_w, cmin + search_range_pixels)
+        num_search_positions = search_end - search_start + 1
+
+        # 儲存所有搜索位置的 NCC 值（用於 sub-pixel refinement）
+        ncc_curve = np.full(num_search_positions, -1.0)
+
+        # 在 mov_image 上滑動搜索
+        for idx, search_x in enumerate(range(search_start, search_end + 1)):
+            # 提取 mov_image 在 search_x 位置的 patch
+            mov_patch = mov_image[rmin:rmax+1, search_x:search_x+patch_w].astype(np.float64)
+
+            if mov_patch.shape != ref_patch.shape:
+                continue
+
+            # 計算 NCC
+            mov_mean = mov_patch.mean()
+            mov_std = mov_patch.std()
+            if mov_std < 1e-10:
+                continue
+
+            mov_norm = (mov_patch - mov_mean) / mov_std
+            ncc = np.mean(ref_norm * mov_norm)
+            ncc_curve[idx] = ncc
+
+        # 找到整數峰值位置
+        best_idx = np.argmax(ncc_curve)
+        best_ncc = ncc_curve[best_idx]
+
+        # Sub-pixel refinement: 使用 Three-Point Gaussian Peak Fitting
+        refined_idx = gaussian_subpixel_refinement(ncc_curve, best_idx)
+
+        # 位移 = (搜索起點 + 精確位置) - 原始位置
+        # search_start + refined_idx = 在 mov_image 中找到的精確 column 位置
+        # cmin = 原始 IW 的 column 位置
+        displacement_pixels = (search_start + refined_idx) - cmin
+        dx_array[i] = displacement_pixels * dx_mm_per_pixel
+        ncc_array[i] = best_ncc
+
+    return dx_array, ncc_array
+
 
 def create_iw_results(iw_info, displacements, ncc_values, velocities, dt):
     """
