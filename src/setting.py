@@ -73,7 +73,7 @@ class ROIConfig:
 class SimulationConfig:
     num_scatterers = 8000
     num_frames = 100
-    num_iterations = 1
+    num_iterations = 10
     dt = 0.01  # 10 ms (100 Hz frame rate)
 
 class FlowConfig:
@@ -143,6 +143,16 @@ class InterrogationWindowConfig:
     search_range_z = 0.8  # mm (暫不使用)
     search_step_x = 0.02  # mm (與 grid dx 相同，精確追蹤)
     search_step_z = 0.05  # mm
+
+class WSSConfig:
+    """WSS constraint configuration for boundary velocity correction.
+
+    Uses Poiseuille flow velocity gradient to constrain boundary IW measurements.
+    Weighted combination: v_corrected = w * v_measured + (1-w) * v_theoretical
+    """
+    enable_wss_correction = True
+    r_threshold_ratio = 0.6   # r/R > 0.6 時開始約束
+    ncc_weight_threshold = 0.7  # NCC 權重計算用的閾值
 
 def init_simulation():
     """

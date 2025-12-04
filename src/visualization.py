@@ -204,13 +204,20 @@ def save_combined_velocity_profiles(iw_positions, iw_velocities, iw_valid,
     fig = plt.figure(figsize=(15, 10))
     gs = GridSpec(2, 3, height_ratios=[1, 1], hspace=0.3, wspace=0.25)
 
-    # === 上排：散點圖 ===
+    # 排序有效數據（依 r 排序，用於連線）
+    sort_idx = np.argsort(r[valid_inside])
+    r_sorted = r[valid_inside][sort_idx]
+    v_mag_sorted = v_mag_est[valid_inside][sort_idx]
+    vx_sorted = vx_est[valid_inside][sort_idx]
+    vz_sorted = vz_est[valid_inside][sort_idx]
+
+    # === 上排：折線圖 ===
     # 子圖 1: |v| vs r
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(r_smooth, v_theo_smooth, 'b-', linewidth=2.5, label='Theoretical')
     ax1.fill_between(r_smooth, v_theo_smooth, alpha=0.2, color='blue')
-    ax1.scatter(r[valid_inside], v_mag_est[valid_inside],
-                c='red', s=50, alpha=0.7, edgecolors='darkred', label='Estimated')
+    ax1.plot(r_sorted, v_mag_sorted, 'ro-', linewidth=1.5, markersize=6,
+             markeredgecolor='darkred', label='Estimated')
     ax1.axvline(x=R, color='green', linestyle='--', linewidth=2, label=f'R={R} mm')
     ax1.set_xlabel('Radial Distance (mm)', fontsize=10)
     ax1.set_ylabel('Velocity Magnitude (mm/s)', fontsize=10)
@@ -224,8 +231,8 @@ def save_combined_velocity_profiles(iw_positions, iw_velocities, iw_valid,
     ax2 = fig.add_subplot(gs[0, 1])
     vx_theo_smooth = v_theo_smooth * flow_dir_norm[0]
     ax2.plot(r_smooth, vx_theo_smooth, 'b-', linewidth=2.5, label='Theoretical vx')
-    ax2.scatter(r[valid_inside], vx_est[valid_inside],
-                c='red', s=50, alpha=0.7, edgecolors='darkred', label='Estimated vx')
+    ax2.plot(r_sorted, vx_sorted, 'ro-', linewidth=1.5, markersize=6,
+             markeredgecolor='darkred', label='Estimated vx')
     ax2.axvline(x=R, color='green', linestyle='--', linewidth=2)
     ax2.set_xlabel('Radial Distance (mm)', fontsize=10)
     ax2.set_ylabel('vx (mm/s)', fontsize=10)
@@ -238,8 +245,8 @@ def save_combined_velocity_profiles(iw_positions, iw_velocities, iw_valid,
     ax3 = fig.add_subplot(gs[0, 2])
     vz_theo_smooth = v_theo_smooth * flow_dir_norm[2]
     ax3.plot(r_smooth, vz_theo_smooth, 'b-', linewidth=2.5, label='Theoretical vz')
-    ax3.scatter(r[valid_inside], vz_est[valid_inside],
-                c='red', s=50, alpha=0.7, edgecolors='darkred', label='Estimated vz')
+    ax3.plot(r_sorted, vz_sorted, 'ro-', linewidth=1.5, markersize=6,
+             markeredgecolor='darkred', label='Estimated vz')
     ax3.axvline(x=R, color='green', linestyle='--', linewidth=2)
     ax3.set_xlabel('Radial Distance (mm)', fontsize=10)
     ax3.set_ylabel('vz (mm/s)', fontsize=10)
@@ -479,16 +486,17 @@ def save_combined_bmode_images(ref_image, matched_image, x, z,
     return fig, axes
 
 
-def plot_ncc_curves(all_ncc_mean, peak_frames, iw_positions, iw_valid,
-                    vessel_cx, vessel_cz, R, dt, filename=None,
+def plot_ncc_curves(all_ncc_iterations, peak_frames, iw_positions, iw_valid,
+                    vessel_cx, vessel_cz, R, filename=None,
                     num_curves=10):
     """
-    繪製 NCC 隨幀數變化的曲線（選擇性顯示部分 IW）
+    繪製 NCC 隨幀數變化的曲線（支援多次迭代數據）
 
     Parameters:
     -----------
-    all_ncc_mean : ndarray (num_iw, num_frames)
-        每個 IW 在每幀的平均 NCC 值
+    all_ncc_iterations : ndarray
+        Shape (num_iterations, num_iw, num_frames) 或 (num_iw, num_frames)
+        若為 2D 則自動擴展為 3D
     peak_frames : ndarray (num_iw,)
         每個 IW 的峰值幀索引
     iw_positions : ndarray (num_iw, 2)
@@ -499,16 +507,18 @@ def plot_ncc_curves(all_ncc_mean, peak_frames, iw_positions, iw_valid,
         血管中心
     R : float
         血管半徑
-    dt : float
-        幀間隔 (s)
     filename : str, optional
         輸出檔名
     num_curves : int
         顯示幾條曲線
     """
-    num_iw, num_frames = all_ncc_mean.shape
-    frames = np.arange(num_frames)
-    time_axis = (frames + 1) * dt * 1000  # 轉換為 ms
+    # 處理 2D/3D 輸入
+    if all_ncc_iterations.ndim == 2:
+        # 若為 2D，擴展為 3D (1 iteration)
+        all_ncc_iterations = all_ncc_iterations[np.newaxis, :, :]
+
+    num_iterations, num_iw, num_frames = all_ncc_iterations.shape
+    frames = np.arange(1, num_frames + 1)  # 1-indexed (Frame 1 = first comparison after 1*dt)
 
     # 計算徑向距離
     cx = iw_positions[:, 0]
@@ -520,7 +530,7 @@ def plot_ncc_curves(all_ncc_mean, peak_frames, iw_positions, iw_valid,
     inside_indices = np.where(inside_mask)[0]
 
     if len(inside_indices) == 0:
-        print("警告: 沒有有效的血管內 IW")
+        print("Warning: No valid IWs inside vessel")
         return None, None
 
     # 依據徑向距離排序，選擇不同位置的 IW
@@ -531,53 +541,65 @@ def plot_ncc_curves(all_ncc_mean, peak_frames, iw_positions, iw_valid,
     # 建立圖表
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
-    # === 子圖 1: 個別 IW 的 NCC 曲線 ===
+    # === 子圖 1: 個別 IW 的 NCC 曲線（平均值）===
     ax1 = axes[0]
     colors = plt.cm.viridis(np.linspace(0, 1, len(selected_indices)))
 
+    # 計算平均 NCC（跨迭代）
+    mean_ncc = np.mean(all_ncc_iterations, axis=0)  # (num_iw, num_frames)
+
     for i, idx in enumerate(selected_indices):
-        ncc_curve = all_ncc_mean[idx, :]
-        peak_frame = peak_frames[idx]
+        ncc_curve = mean_ncc[idx, :]
+        peak_frame_idx = peak_frames[idx]  # 0-indexed array index
         r_val = r[idx]
 
-        ax1.plot(time_axis, ncc_curve, '-', color=colors[i], linewidth=1.5,
+        ax1.plot(frames, ncc_curve, '-', color=colors[i], linewidth=1.5,
                  label=f'IW {idx} (r={r_val:.2f}mm)')
 
-        # 標記峰值點
-        peak_time = (peak_frame + 1) * dt * 1000
-        peak_ncc = ncc_curve[peak_frame]
-        ax1.plot(peak_time, peak_ncc, 'o', color=colors[i], markersize=8)
+        # 標記峰值點 (轉換為 1-indexed)
+        peak_ncc = ncc_curve[peak_frame_idx]
+        ax1.plot(peak_frame_idx + 1, peak_ncc, 'o', color=colors[i], markersize=8)
 
-    ax1.set_xlabel('Time (ms)', fontsize=11)
-    ax1.set_ylabel('NCC (mean of X and Z)', fontsize=11)
-    ax1.set_title('NCC Curves for Selected IWs (inside vessel)', fontsize=12)
+    ax1.set_xlabel('Frame', fontsize=11)
+    ax1.set_ylabel('NCC', fontsize=11)
+    ax1.set_title('NCC Curves for Selected IWs (dots = last valid frame)', fontsize=12)
     ax1.legend(fontsize=8, loc='upper right', ncol=2)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xlim([0, time_axis[-1]])
+    ax1.set_xlim([1, num_frames])
 
-    # === 子圖 2: 全域平均 NCC 曲線 ===
+    # === 子圖 2: 全域 NCC 曲線（min-max 範圍 + 平均值）===
     ax2 = axes[1]
-    global_mean_ncc = np.mean(all_ncc_mean[inside_mask], axis=0)
-    global_std_ncc = np.std(all_ncc_mean[inside_mask], axis=0)
 
-    ax2.fill_between(time_axis, global_mean_ncc - global_std_ncc,
-                     global_mean_ncc + global_std_ncc, alpha=0.3, color='blue')
-    ax2.plot(time_axis, global_mean_ncc, 'b-', linewidth=2, label='Mean ± Std')
+    # 計算每個迭代的全域平均（跨 IW）
+    # Shape: (num_iterations, num_frames)
+    global_per_iter = np.mean(all_ncc_iterations[:, inside_mask, :], axis=1)
 
-    # 標記全域峰值
-    global_peak_frame = np.argmax(global_mean_ncc)
-    global_peak_time = (global_peak_frame + 1) * dt * 1000
-    global_peak_ncc = global_mean_ncc[global_peak_frame]
-    ax2.plot(global_peak_time, global_peak_ncc, 'ro', markersize=12,
-             label=f'Peak at {global_peak_time:.1f}ms (NCC={global_peak_ncc:.3f})')
-    ax2.axvline(global_peak_time, color='red', linestyle='--', alpha=0.5)
+    # 計算 min-max 範圍和平均值（跨迭代）
+    global_mean = np.mean(global_per_iter, axis=0)  # (num_frames,)
+    global_min = np.min(global_per_iter, axis=0)    # (num_frames,)
+    global_max = np.max(global_per_iter, axis=0)    # (num_frames,)
 
-    ax2.set_xlabel('Time (ms)', fontsize=11)
-    ax2.set_ylabel('NCC (mean of X and Z)', fontsize=11)
-    ax2.set_title(f'Global Average NCC (N={np.sum(inside_mask)} IWs inside vessel)', fontsize=12)
+    # 繪製 min-max 範圍（淺紫色）
+    ax2.fill_between(frames, global_min, global_max, alpha=0.3, color='purple',
+                     label=f'Min-Max range ({num_iterations} iterations)')
+
+    # 繪製平均值（深藍色）
+    ax2.plot(frames, global_mean, 'darkblue', linewidth=2, label='Mean')
+
+    # 標記全域峰值 (轉換為 1-indexed)
+    global_peak_idx = np.argmax(global_mean)  # 0-indexed array index
+    global_peak_frame = global_peak_idx + 1   # 1-indexed for display
+    global_peak_ncc = global_mean[global_peak_idx]
+    ax2.plot(global_peak_frame, global_peak_ncc, 'ro', markersize=12,
+             label=f'Peak at Frame {global_peak_frame} (NCC={global_peak_ncc:.3f})')
+    ax2.axvline(global_peak_frame, color='red', linestyle='--', alpha=0.5)
+
+    ax2.set_xlabel('Frame', fontsize=11)
+    ax2.set_ylabel('NCC', fontsize=11)
+    ax2.set_title(f'Global Average NCC (N={np.sum(inside_mask)} IWs, {num_iterations} iterations)', fontsize=12)
     ax2.legend(fontsize=10)
     ax2.grid(True, alpha=0.3)
-    ax2.set_xlim([0, time_axis[-1]])
+    ax2.set_xlim([1, num_frames])
 
     plt.tight_layout()
 
@@ -859,9 +881,24 @@ def create_ncc_tracking_animation(all_frames, ref_image, iw_mask, iw_index,
     ax_mov.set_title('Moving Image (Frame 0)', fontsize=12)
     ax_mov.set_xlabel('Lateral (mm)')
     ax_mov.set_ylabel('Axial (mm)')
+
+    # Search Window (紅色虛線框) - 固定顯示搜索範圍
+    search_range_mm = search_range_pixels * dx
+    search_window_x_min = x_min_mm - search_range_mm
+    search_window_x_max = x_max_mm + search_range_mm
+    search_window_width = search_window_x_max - search_window_x_min
+    rect_search = Rectangle((search_window_x_min, z_min_mm), search_window_width, z_max_mm - z_min_mm,
+                              linewidth=2, edgecolor='red', facecolor='none', linestyle='--',
+                              label='Search Window')
+    ax_mov.add_patch(rect_search)
+
+    # Best Match (綠色框) - 會隨 NCC peak 移動
     rect_mov = Rectangle((x_min_mm, z_min_mm), x_max_mm - x_min_mm, z_max_mm - z_min_mm,
-                          linewidth=2, edgecolor='lime', facecolor='none')
+                          linewidth=2, edgecolor='lime', facecolor='none', label='Best Match')
     ax_mov.add_patch(rect_mov)
+
+    # 圖例
+    ax_mov.legend(loc='upper right', fontsize=8)
 
     # Moving zoom
     im_mov_zoom = ax_mov_zoom.imshow(ref_patch, cmap='gray', aspect='auto')

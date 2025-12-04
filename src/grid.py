@@ -20,6 +20,94 @@ def create_roi_masks(X, Z, roi_x_positions, vessel_cz, roi_size):
 
     return roi_masks
 
+def create_vertical_iw_line(X, Z, iw_config):
+    """
+    Generate a single vertical column of IWs at x = vessel_cx (perpendicular to flow).
+
+    Only includes IWs where the center is inside the vessel (distance < R).
+    This is optimized for X-direction flow measurement with Poiseuille profile.
+
+    Parameters:
+    -----------
+    X, Z : ndarray (Nz, Nx)
+        Spatial coordinate grids (mm)
+    iw_config : InterrogationWindowConfig
+        Configuration object
+
+    Returns:
+    --------
+    iw_info : list of dict
+        Each element: {
+            'cx': float,       # Center X position (mm) - always vessel_cx
+            'cz': float,       # Center Z position (mm)
+            'mask': ndarray,   # Boolean mask (Nz, Nx)
+            'index': tuple,    # (i, 0) - single column
+            'inside_vessel': bool,  # Always True (filtered)
+            'vessel_overlap': float  # Fraction of IW inside vessel [0, 1]
+            'distance_to_center': float  # Distance from vessel center (mm)
+        }
+    n_iws : int
+        Number of IWs in the vertical line
+    """
+    # Fixed X position at vessel center
+    cx = iw_config.vessel_cx
+
+    # Z range: from cz - R to cz + R
+    z_min = iw_config.vessel_cz - iw_config.vessel_radius
+    z_max = iw_config.vessel_cz + iw_config.vessel_radius
+
+    # Generate Z centers with overlap
+    z_start = z_min + iw_config.iw_size_z / 2
+    z_centers = np.arange(z_start, z_max, iw_config.step_z)
+
+    # 不過濾邊界，允許 IW 邊緣超出血管（中心在內即可）
+
+    # Create IW metadata and masks
+    iw_info = []
+    half_x = iw_config.iw_size_x / 2
+    half_z = iw_config.iw_size_z / 2
+
+    for i, cz in enumerate(z_centers):
+        # Check if IW center is inside vessel (1D check since cx = vessel_cx)
+        dist_to_center = abs(cz - iw_config.vessel_cz)
+
+        if dist_to_center >= iw_config.vessel_radius:
+            continue  # Skip IWs outside vessel
+
+        # Create rectangular mask
+        mask = ((X >= cx - half_x) & (X <= cx + half_x) &
+               (Z >= cz - half_z) & (Z <= cz + half_z))
+
+        # Check if valid (enough pixels)
+        if np.sum(mask) < iw_config.min_pixels_per_iw:
+            continue
+
+        # Calculate vessel overlap
+        vessel_overlap = _estimate_vessel_overlap(
+            cx, cz, iw_config.vessel_cx, iw_config.vessel_cz,
+            iw_config.vessel_radius, half_x, half_z, mask, X, Z
+        )
+
+        iw_info.append({
+            'cx': cx,
+            'cz': cz,
+            'mask': mask,
+            'index': (i, 0),  # Single column
+            'inside_vessel': True,  # Guaranteed by filter
+            'vessel_overlap': vessel_overlap,
+            'distance_to_center': dist_to_center
+        })
+
+    # Sort by distance to center (center IW first)
+    iw_info.sort(key=lambda x: x['distance_to_center'])
+
+    # Re-index after sorting
+    for i, iw in enumerate(iw_info):
+        iw['index'] = (i, 0)
+
+    return iw_info, len(iw_info)
+
+
 def create_iw_grid(X, Z, iw_config):
     """
     Generate 2D grid of Interrogation Windows with 50% overlap.

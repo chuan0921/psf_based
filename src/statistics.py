@@ -182,95 +182,139 @@ def compute_iw_error_metrics(iw_positions, iw_velocities, iw_valid,
     }
 
 
-def generate_iw_error_report(metrics, vessel_params, flow_direction):
-    """
-    生成格式化的誤差分析報告
+def generate_iw_error_report(metrics, vessel_params, flow_direction, iw_details=None):
+    """Generate formatted error analysis report in Markdown format.
 
-    Parameters:
-    -----------
-    metrics : dict
-        compute_iw_error_metrics() 的輸出
-    vessel_params : dict
-        {'R': float, 'Vmax': float}
-    flow_direction : ndarray (3,)
-        流動方向向量
+    Args:
+        metrics: Output from compute_iw_error_metrics().
+        vessel_params: Dict with keys R, Vmax, cx, cz.
+        flow_direction: Flow direction vector with shape (3,).
+        iw_details: Optional list of dicts with per-IW info. Each dict contains
+            iw_idx, cz, r, max_ncc, max_ncc_frame, displacement, v_theoretical, v_measured.
 
     Returns:
-    --------
-    report : str
-        格式化的報告字串
+        Formatted report string in Markdown.
     """
     flow_dir_norm = flow_direction / np.linalg.norm(flow_direction)
 
     report = []
-    report.append("=" * 80)
-    report.append("VELOCITY ESTIMATION ERROR ANALYSIS")
-    report.append("=" * 80)
+    report.append("# Velocity Estimation Error Analysis")
     report.append("")
-    report.append("CONFIGURATION:")
-    report.append(f"  Vessel Radius (R):     {vessel_params['R']:.2f} mm")
-    report.append(f"  Maximum Velocity:      {vessel_params['Vmax']:.1f} mm/s")
-    report.append(f"  Flow Direction:        [{flow_dir_norm[0]:.3f}, {flow_dir_norm[1]:.3f}, {flow_dir_norm[2]:.3f}]")
-    report.append("")
-    report.append("SAMPLE STATISTICS:")
-    report.append(f"  Valid IWs (inside vessel): {metrics['num_valid']}")
-    report.append(f"  Total IWs inside vessel:   {metrics['num_inside_vessel']}")
-    report.append("")
-    report.append("=" * 80)
-    report.append("ERROR METRICS")
-    report.append("=" * 80)
 
-    # 速度大小誤差
+    # Configuration
+    report.append("## Configuration")
+    report.append("")
+    report.append("| Parameter | Value |")
+    report.append("|-----------|-------|")
+    report.append(f"| Vessel Radius | {vessel_params['R']:.2f} mm |")
+    report.append(f"| Maximum Velocity | {vessel_params['Vmax']:.1f} mm/s |")
+    report.append(f"| Flow Direction | [{flow_dir_norm[0]:.3f}, {flow_dir_norm[1]:.3f}, {flow_dir_norm[2]:.3f}] |")
+    report.append("")
+
+    # Sample Statistics
+    report.append("## Sample Statistics")
+    report.append("")
+    report.append("| Metric | Value |")
+    report.append("|--------|-------|")
+    report.append(f"| Valid IWs | {metrics['num_valid']} |")
+    report.append(f"| Total IWs inside vessel | {metrics['num_inside_vessel']} |")
+    report.append("")
+
+    # Error Metrics
+    report.append("## Error Metrics")
+    report.append("")
+
+    # Velocity Magnitude
     mag = metrics['magnitude']
+    report.append("### Velocity Magnitude")
     report.append("")
-    report.append("VELOCITY MAGNITUDE |v|:")
-    report.append("-" * 40)
     if not np.isnan(mag['rmse']):
-        report.append(f"  RMSE:           {mag['rmse']:.2f} mm/s")
-        report.append(f"  NRMSE:          {mag['nrmse']:.2f}% (of Vmax)")
-        report.append(f"  MAE:            {mag['mae']:.2f} mm/s")
-        report.append(f"  Max Error:      {mag['max_error']:.2f} mm/s")
-        report.append(f"  R-squared:      {mag['r_squared']:.4f}")
+        report.append("| Metric | Value |")
+        report.append("|--------|-------|")
+        report.append(f"| RMSE | {mag['rmse']:.2f} mm/s |")
+        report.append(f"| NRMSE | {mag['nrmse']:.2f}% |")
+        report.append(f"| MAE | {mag['mae']:.2f} mm/s |")
+        report.append(f"| Max Error | {mag['max_error']:.2f} mm/s |")
+        report.append(f"| R-squared | {mag['r_squared']:.4f} |")
     else:
-        report.append("  ERROR: No valid data")
+        report.append("No valid data")
+    report.append("")
 
-    # vx 分量誤差
+    # X-Component
     vx = metrics['vx']
+    report.append(f"### X-Component (flow_dir_x = {flow_dir_norm[0]:.3f})")
     report.append("")
-    report.append(f"X-COMPONENT vx (flow_dir_x = {flow_dir_norm[0]:.3f}):")
-    report.append("-" * 40)
     if not np.isnan(vx['rmse']):
-        report.append(f"  RMSE:           {vx['rmse']:.2f} mm/s")
-        report.append(f"  NRMSE:          {vx['nrmse']:.2f}%")
-        report.append(f"  MAE:            {vx['mae']:.2f} mm/s")
-        report.append(f"  Max Error:      {vx['max_error']:.2f} mm/s")
+        report.append("| Metric | Value |")
+        report.append("|--------|-------|")
+        report.append(f"| RMSE | {vx['rmse']:.2f} mm/s |")
+        report.append(f"| NRMSE | {vx['nrmse']:.2f}% |")
+        report.append(f"| MAE | {vx['mae']:.2f} mm/s |")
+        report.append(f"| Max Error | {vx['max_error']:.2f} mm/s |")
     else:
-        report.append("  ERROR: No valid data")
+        report.append("No valid data")
+    report.append("")
 
-    # vz 分量誤差
+    # Z-Component
     vz = metrics['vz']
+    report.append(f"### Z-Component (flow_dir_z = {flow_dir_norm[2]:.3f})")
     report.append("")
-    report.append(f"Z-COMPONENT vz (flow_dir_z = {flow_dir_norm[2]:.3f}):")
-    report.append("-" * 40)
     if not np.isnan(vz['rmse']):
-        report.append(f"  RMSE:           {vz['rmse']:.2f} mm/s")
-        report.append(f"  NRMSE:          {vz['nrmse']:.2f}%")
-        report.append(f"  MAE:            {vz['mae']:.2f} mm/s")
-        report.append(f"  Max Error:      {vz['max_error']:.2f} mm/s")
+        report.append("| Metric | Value |")
+        report.append("|--------|-------|")
+        report.append(f"| RMSE | {vz['rmse']:.2f} mm/s |")
+        report.append(f"| NRMSE | {vz['nrmse']:.2f}% |")
+        report.append(f"| MAE | {vz['mae']:.2f} mm/s |")
+        report.append(f"| Max Error | {vz['max_error']:.2f} mm/s |")
     else:
-        report.append("  ERROR: No valid data")
-
-    # 相對誤差統計
+        report.append("No valid data")
     report.append("")
-    report.append("RELATIVE ERROR STATISTICS:")
-    report.append("-" * 40)
+
+    # Relative Error
+    report.append("### Relative Error Statistics")
+    report.append("")
     if not np.isnan(metrics['relative_error_mean']):
-        report.append(f"  Mean Relative Error:   {metrics['relative_error_mean']:.1f}%")
-        report.append(f"  Std of Relative Error: {metrics['relative_error_std']:.1f}%")
+        report.append("| Metric | Value |")
+        report.append("|--------|-------|")
+        report.append(f"| Mean Relative Error | {metrics['relative_error_mean']:.1f}% |")
+        report.append(f"| Std of Relative Error | {metrics['relative_error_std']:.1f}% |")
     else:
-        report.append("  ERROR: Cannot compute relative error")
-
+        report.append("Cannot compute relative error")
     report.append("")
-    report.append("=" * 80)
+
+    # Per-IW Details
+    if iw_details is not None and len(iw_details) > 0:
+        report.append("## Per-IW Details")
+        report.append("")
+        report.append("Note: Frame number is 1-indexed (Frame 1 = first comparison after 1*dt)")
+        report.append("")
+        report.append("| IW | Z (mm) | r (mm) | Max NCC | Frame | Displacement (mm) | V_theoretical (mm/s) | V_measured (mm/s) | Rel Error (%) | WSS |")
+        report.append("|----|--------|--------|---------|-------|-------------------|----------------------|-------------------|---------------|-----|")
+
+        for iw in iw_details:
+            r = iw.get('r', np.nan)
+            v_theo = iw.get('v_theoretical', np.nan)
+            v_meas = iw.get('v_measured', np.nan)
+            corrected = iw.get('corrected', False)
+            # Frame 顯示為 1-indexed (frame_idx + 1)
+            frame_display = iw['max_ncc_frame'] + 1
+
+            # Relative error = (theoretical - measured) / theoretical * 100%
+            if not np.isnan(v_theo) and not np.isnan(v_meas) and v_theo != 0:
+                rel_error = (v_theo - v_meas) / v_theo * 100
+            else:
+                rel_error = np.nan
+
+            r_str = f"{r:.2f}" if not np.isnan(r) else "N/A"
+            v_theo_str = f"{v_theo:.2f}" if not np.isnan(v_theo) else "N/A"
+            v_meas_str = f"{v_meas:.2f}" if not np.isnan(v_meas) else "N/A"
+            rel_err_str = f"{rel_error:.1f}" if not np.isnan(rel_error) else "N/A"
+            wss_str = "Yes" if corrected else ""
+
+            report.append(
+                f"| {iw['iw_idx']} | {iw['cz']:.2f} | {r_str} | {iw['max_ncc']:.4f} | "
+                f"{frame_display} | {iw['displacement']:.4f} | {v_theo_str} | {v_meas_str} | {rel_err_str} | {wss_str} |"
+            )
+        report.append("")
 
     return "\n".join(report)
