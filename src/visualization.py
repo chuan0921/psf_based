@@ -63,11 +63,12 @@ def create_animation(frames, x, z, vessel_params, roi_params, filename='animatio
 
     plt.close()
 
-def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_velocities,
-                                iw_valid, vessel_params, filename=None,
-                                scale_factor=0.03, arrow_width=0.008):
+def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_displacements,
+                                iw_velocities_for_color, iw_valid, vessel_params,
+                                center_iw_info=None, filename=None,
+                                scale_factor=0.5, arrow_width=0.008):
     """
-    在 B-mode 影像上繪製速度向量場
+    在 B-mode 影像上繪製位移向量場
 
     Parameters:
     -----------
@@ -77,16 +78,20 @@ def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_velocities,
         空間座標軸 (mm)
     iw_positions : ndarray (N, 2)
         IW 中心位置 [cx, cz] (mm)
-    iw_velocities : ndarray (N, 2)
-        速度向量 [vx, vz] (mm/s)
+    iw_displacements : ndarray (N, 2)
+        位移向量 [dx, dz] (mm) - 用於箭頭長度
+    iw_velocities_for_color : ndarray (N,)
+        速度大小 (mm/s) - 用於箭頭顏色
     iw_valid : ndarray (N,)
         有效性旗標
     vessel_params : dict
-        {'cx': float, 'cz': float, 'R': float}
+        {'cx': float, 'cz': float, 'R': float, 'Vmax': float}
+    center_iw_info : dict, optional
+        {'r': float, 'last_valid_frame': int} - 用於標題顯示
     filename : str, optional
         輸出檔名
     scale_factor : float
-        箭頭長度縮放因子
+        箭頭長度縮放因子 (1mm 位移 = scale_factor mm 箭頭)
     arrow_width : float
         箭頭寬度
     """
@@ -99,36 +104,36 @@ def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_velocities,
     ax.imshow(bmode_image, extent=[x.min(), x.max(), z.max(), z.min()],
               cmap='gray', aspect='auto', alpha=0.8)
 
-    # 2. 準備速度資料
+    # 2. 準備資料
     cx = iw_positions[:, 0]
     cz = iw_positions[:, 1]
-    vx = iw_velocities[:, 0]
-    vz = iw_velocities[:, 1]
-    v_mag = np.sqrt(vx**2 + vz**2)
+    dx = iw_displacements[:, 0]
+    dz = iw_displacements[:, 1]
+    v_mag = iw_velocities_for_color
 
     # 3. 過濾有效向量
-    valid_mask = iw_valid & ~np.isnan(v_mag)
+    valid_mask = iw_valid & ~np.isnan(dx) & ~np.isnan(v_mag)
 
     if np.sum(valid_mask) == 0:
-        print("警告: 沒有有效的速度向量可顯示")
+        print("Warning: No valid vectors to display")
         plt.close()
         return None, None
 
-    # 4. 顏色正規化
-    vmax = np.nanmax(v_mag[valid_mask])
+    # 4. 顏色正規化（用速度）
+    vmax = vessel_params.get('Vmax', np.nanmax(v_mag[valid_mask]))
     norm = Normalize(vmin=0, vmax=vmax)
     cmap_obj = cm.get_cmap('coolwarm')
 
-    # 5. 繪製速度箭頭
+    # 5. 繪製位移箭頭（長度=位移，顏色=速度）
     Q = ax.quiver(cx[valid_mask], cz[valid_mask],
-                  vx[valid_mask], vz[valid_mask],
+                  dx[valid_mask], dz[valid_mask],
                   v_mag[valid_mask],
                   cmap=cmap_obj, norm=norm,
                   scale=1/scale_factor, scale_units='xy',
                   width=arrow_width, headwidth=3, headlength=4,
                   alpha=0.9)
 
-    # 6. 加入 colorbar
+    # 6. 加入 colorbar（顯示速度）
     cbar = plt.colorbar(Q, ax=ax, label='Velocity (mm/s)')
 
     # 7. 加入血管邊界圓圈
@@ -143,7 +148,14 @@ def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_velocities,
     # 8. 標籤和標題
     ax.set_xlabel('Lateral Position (mm)', fontsize=12)
     ax.set_ylabel('Axial Position (mm)', fontsize=12)
-    ax.set_title(f'Velocity Vector Field (N={np.sum(valid_mask)} valid IWs)', fontsize=14)
+
+    if center_iw_info is not None:
+        title = (f"Displacement Field "
+                 f"(center IW: r={center_iw_info['r']:.2f}mm, "
+                 f"last valid frame={center_iw_info['last_valid_frame']})")
+    else:
+        title = f'Displacement Field (N={np.sum(valid_mask)} valid IWs)'
+    ax.set_title(title, fontsize=14)
     ax.legend(loc='upper right')
 
     plt.tight_layout()

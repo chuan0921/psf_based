@@ -383,13 +383,37 @@ def main():
 
         # 1. 向量場視覺化
         if saved_ref_image is not None:
-            print("\n1. 生成速度向量場圖...")
+            print("\n1. 生成位移向量場圖...")
+
+            # 找中心 IW（最靠近血管中心的有效 IW）
+            iw_distances_to_center = np.sqrt(
+                (iw_positions[:, 0] - vessel_params['cx'])**2 +
+                (iw_positions[:, 1] - vessel_params['cz'])**2
+            )
+            valid_iw_indices = np.where(valid_mask)[0]
+            center_iw_idx = valid_iw_indices[np.argmin(iw_distances_to_center[valid_mask])]
+
+            # 取得中心 IW 的 last valid frame 和徑向距離
+            center_last_valid = last_valid_frame[center_iw_idx]
+            center_r = abs(iw_info[center_iw_idx]['cz'] - vessel_params['cz'])
+
+            # 準備所有 IW 在該幀的位移（方案 A：同一時間點）
+            displacement_at_frame = all_dx[:, center_last_valid]
+            iw_displacements = np.stack([displacement_at_frame, np.zeros(num_iw)], axis=1)
+
+            # 中心 IW 資訊（用於標題）
+            center_iw_info = {
+                'r': center_r,
+                'last_valid_frame': center_last_valid + 1  # 1-indexed
+            }
+
             plot_velocity_vector_field(
                 saved_ref_image, x, z,
-                iw_pos, iw_vel, iw_valid_arr,
+                iw_pos, iw_displacements, final_v_mag, iw_valid_arr,
                 vessel_params,
+                center_iw_info=center_iw_info,
                 filename=os.path.join(output_dir, 'velocity_vector_field.png'),
-                scale_factor=0.02
+                scale_factor=0.5
             )
 
             # 1.5 NCC 曲線圖
@@ -416,15 +440,7 @@ def main():
             print("1.7 生成 NCC Tracking 動畫...")
             search_range_pixels = int(iw_cfg.search_range_x / grid_cfg.dx)
 
-            # 選擇中心 IW（最靠近血管中心的有效 IW）
-            iw_distances_to_center = np.sqrt(
-                (iw_positions[:, 0] - vessel_params['cx'])**2 +
-                (iw_positions[:, 1] - vessel_params['cz'])**2
-            )
-            valid_iw_indices = np.where(valid_mask)[0]
-            center_iw_idx = valid_iw_indices[np.argmin(iw_distances_to_center[valid_mask])]
-
-            # 選擇邊緣 IW（有效 IW 中距離中心最遠的）
+            # 選擇邊緣 IW（有效 IW 中距離中心最遠的，center_iw_idx 已在上方定義）
             edge_iw_idx = valid_iw_indices[np.argmax(iw_distances_to_center[valid_mask])]
 
             # 產生中心 IW 的 NCC tracking 動畫
