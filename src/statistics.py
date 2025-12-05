@@ -288,32 +288,44 @@ def generate_iw_error_report(metrics, vessel_params, flow_direction, iw_details=
         report.append("")
         report.append("Note: Frame number is 1-indexed (Frame 1 = first comparison after 1*dt)")
         report.append("")
-        report.append("| IW | Z (mm) | r (mm) | Max NCC | Frame | Displacement (mm) | V_theoretical (mm/s) | V_measured (mm/s) | Rel Error (%) | WSS |")
-        report.append("|----|--------|--------|---------|-------|-------------------|----------------------|-------------------|---------------|-----|")
+        report.append("| IW | Z (mm) | r (mm) | Max NCC | Frame | dx (mm) | dz (mm) | V_theo (mm/s) | Vx (mm/s) | Vz (mm/s) | V_mag (mm/s) | Rel Err (%) | WSS |")
+        report.append("|----|--------|--------|---------|-------|---------|---------|---------------|-----------|-----------|--------------|-------------|-----|")
 
         for iw in iw_details:
             r = iw.get('r', np.nan)
             v_theo = iw.get('v_theoretical', np.nan)
-            v_meas = iw.get('v_measured', np.nan)
+            # 2D 速度欄位
+            v_meas_x = iw.get('v_measured_x', iw.get('v_measured', np.nan))
+            v_meas_z = iw.get('v_measured_z', 0.0)
+            v_meas_mag = iw.get('v_measured_mag', np.nan)
+            if np.isnan(v_meas_mag) and not np.isnan(v_meas_x):
+                v_meas_mag = np.sqrt(v_meas_x**2 + v_meas_z**2)
+            # 2D 位移欄位
+            disp_x = iw.get('displacement_x', iw.get('displacement', np.nan))
+            disp_z = iw.get('displacement_z', 0.0)
             corrected = iw.get('corrected', False)
             # Frame 顯示為 1-indexed (frame_idx + 1)
             frame_display = iw['max_ncc_frame'] + 1
 
-            # Relative error = (theoretical - measured) / theoretical * 100%
-            if not np.isnan(v_theo) and not np.isnan(v_meas) and v_theo != 0:
-                rel_error = (v_theo - v_meas) / v_theo * 100
+            # Relative error = (theoretical - measured_mag) / theoretical * 100%
+            if not np.isnan(v_theo) and not np.isnan(v_meas_mag) and v_theo != 0:
+                rel_error = (v_theo - v_meas_mag) / v_theo * 100
             else:
                 rel_error = np.nan
 
             r_str = f"{r:.2f}" if not np.isnan(r) else "N/A"
             v_theo_str = f"{v_theo:.2f}" if not np.isnan(v_theo) else "N/A"
-            v_meas_str = f"{v_meas:.2f}" if not np.isnan(v_meas) else "N/A"
+            vx_str = f"{v_meas_x:.2f}" if not np.isnan(v_meas_x) else "N/A"
+            vz_str = f"{v_meas_z:.2f}" if not np.isnan(v_meas_z) else "N/A"
+            vmag_str = f"{v_meas_mag:.2f}" if not np.isnan(v_meas_mag) else "N/A"
+            dx_str = f"{disp_x:.4f}" if not np.isnan(disp_x) else "N/A"
+            dz_str = f"{disp_z:.4f}" if not np.isnan(disp_z) else "N/A"
             rel_err_str = f"{rel_error:.1f}" if not np.isnan(rel_error) else "N/A"
             wss_str = "Yes" if corrected else ""
 
             report.append(
                 f"| {iw['iw_idx']} | {iw['cz']:.2f} | {r_str} | {iw['max_ncc']:.4f} | "
-                f"{frame_display} | {iw['displacement']:.4f} | {v_theo_str} | {v_meas_str} | {rel_err_str} | {wss_str} |"
+                f"{frame_display} | {dx_str} | {dz_str} | {v_theo_str} | {vx_str} | {vz_str} | {vmag_str} | {rel_err_str} | {wss_str} |"
             )
         report.append("")
 

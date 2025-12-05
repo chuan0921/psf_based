@@ -111,8 +111,8 @@ def plot_velocity_vector_field(bmode_image, x, z, iw_positions, iw_displacements
     dz = iw_displacements[:, 1]
     v_mag = iw_velocities_for_color
 
-    # 3. 過濾有效向量
-    valid_mask = iw_valid & ~np.isnan(dx) & ~np.isnan(v_mag)
+    # 3. 過濾有效向量 (2D: 檢查 dx 和 dz)
+    valid_mask = iw_valid & ~np.isnan(dx) & ~np.isnan(dz) & ~np.isnan(v_mag)
 
     if np.sum(valid_mask) == 0:
         print("Warning: No valid vectors to display")
@@ -729,6 +729,122 @@ def plot_peak_frame_distribution(peak_frames, iw_positions, iw_valid,
     return fig, axes
 
 
+def compute_2d_ncc_map(ref_image, mov_image, template_mask,
+                        search_range_x, search_range_z, dx_pix, dz_pix,
+                        x_grid=None, z_grid=None, vessel_params=None):
+    """
+    計算 2D NCC map 用於視覺化
+
+    Parameters:
+    -----------
+    ref_image : ndarray (Nz, Nx)
+        參考影像
+    mov_image : ndarray (Nz, Nx)
+        移動影像
+    template_mask : ndarray (Nz, Nx)
+        IW 區域的 mask
+    search_range_x : float
+        X 方向搜尋範圍 (mm), [0, +search_range_x]
+    search_range_z : float
+        Z 方向搜尋範圍 (mm), [-search_range_z, +search_range_z]
+    dx_pix, dz_pix : float
+        像素大小 (mm)
+    x_grid, z_grid : ndarray, optional
+        座標軸 (mm)，血管裁切時需要
+    vessel_params : dict, optional
+        血管參數 {'cx': float, 'cz': float, 'R': float}
+        若提供，會將 search window 裁切到血管內
+
+    Returns:
+    --------
+    ncc_map : 2D array, shape (Z搜尋像素數, X搜尋像素數)
+    x_offsets : 1D array, X方向偏移量 (mm)
+    z_offsets : 1D array, Z方向偏移量 (mm)
+    search_bounds : dict, 搜尋區域邊界 (像素座標)
+    template_bounds : dict, template 邊界
+    """
+    import cv2
+
+    # 提取 template 邊界
+    rows, cols = np.where(template_mask)
+    r_min, r_max = rows.min(), rows.max()
+    c_min, c_max = cols.min(), cols.max()
+    template = ref_image[r_min:r_max+1, c_min:c_max+1]
+    template_h, template_w = template.shape
+
+    # 計算搜尋範圍 (像素)
+    search_range_x_pix = int(search_range_x / dx_pix)
+    search_range_z_pix = int(search_range_z / dz_pix)
+
+    # 定義搜尋區域邊界
+    # X: 從 template 位置開始，往正向搜尋
+    sr_c_start = c_min
+    sr_c_end = min(c_min + search_range_x_pix + template_w, mov_image.shape[1])
+    # Z: 以 template 位置為中心，上下搜尋
+    sr_r_start = max(r_min - search_range_z_pix, 0)
+    sr_r_end = min(r_min + search_range_z_pix + template_h, mov_image.shape[0])
+
+    # 血管邊界裁切（若提供 vessel_params 和 grid）
+    if vessel_params is not None and x_grid is not None and z_grid is not None:
+        vessel_cx = vessel_params['cx']
+        vessel_cz = vessel_params['cz']
+        vessel_R = vessel_params['R']
+
+        # IW 中心在 mm 座標
+        iw_cx = x_grid[c_min + template_w // 2]
+        iw_cz = z_grid[r_min + template_h // 2]
+
+        # 計算該 X 位置的血管 Z 邊界
+        dx_from_center = iw_cx - vessel_cx
+        if abs(dx_from_center) < vessel_R:
+            z_extent = np.sqrt(vessel_R**2 - dx_from_center**2)
+            z_top_mm = vessel_cz - z_extent
+            z_bottom_mm = vessel_cz + z_extent
+
+            # 轉換為像素座標
+            z_top_pix = int((z_top_mm - z_grid[0]) / dz_pix)
+            z_bottom_pix = int((z_bottom_mm - z_grid[0]) / dz_pix)
+
+            # 裁切 search region 到血管內
+            sr_r_start = max(sr_r_start, z_top_pix)
+            sr_r_end = min(sr_r_end, z_bottom_pix)
+
+    # 提取搜尋區域
+    search_region = mov_image[sr_r_start:sr_r_end, sr_c_start:sr_c_end]
+
+    # 檢查搜尋區域是否足夠大
+    if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
+        # 回傳空結果
+        return np.array([[0]]), np.array([0]), np.array([0]), {}, {}
+
+    # 計算 NCC map
+    ncc_map = cv2.matchTemplate(
+        search_region.astype(np.float32),
+        template.astype(np.float32),
+        cv2.TM_CCOEFF_NORMED
+    )
+
+    # 計算偏移量軸 (mm)
+    ncc_h, ncc_w = ncc_map.shape
+    x_offsets = np.arange(ncc_w) * dx_pix  # 0 to +search_range_x
+    # Z: 以 template 位置為零點
+    z_zero_idx = r_min - sr_r_start  # template 在 search region 中的相對位置
+    z_offsets = (np.arange(ncc_h) - z_zero_idx) * dz_pix
+
+    search_bounds = {
+        'r_start': sr_r_start, 'r_end': sr_r_end,
+        'c_start': sr_c_start, 'c_end': sr_c_end
+    }
+
+    template_bounds = {
+        'r_min': r_min, 'r_max': r_max,
+        'c_min': c_min, 'c_max': c_max,
+        'height': template_h, 'width': template_w
+    }
+
+    return ncc_map, x_offsets, z_offsets, search_bounds, template_bounds
+
+
 def compute_ncc_curve(ref_patch, mov_image, rmin, rmax, cmin, search_range_pixels):
     """
     計算 NCC 曲線：在 mov_image 上滑動搜索
@@ -790,10 +906,11 @@ def compute_ncc_curve(ref_patch, mov_image, rmin, rmax, cmin, search_range_pixel
 
 
 def create_ncc_tracking_animation(all_frames, ref_image, iw_mask, iw_index,
-                                   x, z, search_range_pixels,
-                                   output_path, fps=5, max_frames=50):
+                                   x, z, search_range_x, search_range_z,
+                                   output_path, fps=5, max_frames=50,
+                                   vessel_params=None):
     """
-    建立 NCC tracking 視覺化動畫
+    建立 2D NCC tracking 視覺化動畫
 
     Parameters:
     -----------
@@ -807,17 +924,26 @@ def create_ncc_tracking_animation(all_frames, ref_image, iw_mask, iw_index,
         IW 索引
     x, z : ndarray
         座標軸 (mm)
-    search_range_pixels : int
-        搜索範圍（像素）
+    search_range_x : float
+        X 方向搜尋範圍 (mm), [0, +search_range_x]
+    search_range_z : float
+        Z 方向搜尋範圍 (mm), [-search_range_z, +search_range_z]
     output_path : str
         輸出路徑
     fps : int
         動畫幀率
     max_frames : int
         最大幀數
+    vessel_params : dict, optional
+        血管參數 {'cx': float, 'cz': float, 'R': float}
+        若提供，會將 search window 裁切到血管內
     """
+    import cv2
     from matplotlib.patches import Rectangle
     from tqdm import tqdm
+
+    dx = np.abs(x[1] - x[0])
+    dz = np.abs(z[1] - z[0])
 
     # 找到 IW 的 bounding box
     rows = np.any(iw_mask, axis=1)
@@ -827,139 +953,161 @@ def create_ncc_tracking_animation(all_frames, ref_image, iw_mask, iw_index,
 
     # 提取參考 patch
     ref_patch = ref_image[rmin:rmax+1, cmin:cmax+1].astype(np.float64)
-
-    dx = np.abs(x[1] - x[0])
+    template_h, template_w = ref_patch.shape
 
     # IW 在 mm 座標中的位置
     x_min_mm = x[cmin]
     x_max_mm = x[cmax]
     z_min_mm = z[rmin]
     z_max_mm = z[rmax]
+    iw_width_mm = x_max_mm - x_min_mm
+    iw_height_mm = z_max_mm - z_min_mm
 
-    # 預計算所有幀的 NCC 曲線
+    # 預計算所有幀的 2D NCC map
     num_frames = min(len(all_frames), max_frames)
     all_ncc_data = []
 
-    print(f"預計算 {num_frames} 幀的 NCC 曲線...")
+    print(f"預計算 {num_frames} 幀的 2D NCC map...")
     for frame_idx in tqdm(range(num_frames)):
         mov_image = all_frames[frame_idx]
-        positions, ncc_curve = compute_ncc_curve(
-            ref_patch, mov_image, rmin, rmax, cmin, search_range_pixels
+        ncc_map, x_offsets, z_offsets, search_bounds, template_bounds = compute_2d_ncc_map(
+            ref_image, mov_image, iw_mask,
+            search_range_x, search_range_z, dx, dz,
+            x_grid=x, z_grid=z, vessel_params=vessel_params
         )
 
-        if len(ncc_curve) > 0:
-            best_idx = np.argmax(ncc_curve)
-            best_ncc = ncc_curve[best_idx]
-            best_offset = positions[best_idx]
+        if ncc_map.size > 1:
+            # 找到 peak 位置
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(ncc_map)
+            peak_col, peak_row = max_loc  # (x, y) in ncc_map coordinates
+            best_dx = x_offsets[peak_col] if peak_col < len(x_offsets) else 0
+            best_dz = z_offsets[peak_row] if peak_row < len(z_offsets) else 0
+            best_ncc = max_val
         else:
-            best_idx, best_ncc, best_offset = 0, 0, 0
+            peak_col, peak_row = 0, 0
+            best_dx, best_dz, best_ncc = 0, 0, 0
 
         all_ncc_data.append({
-            'positions': positions,
-            'ncc_curve': ncc_curve,
-            'best_idx': best_idx,
-            'best_ncc': best_ncc,
-            'best_offset': best_offset
+            'ncc_map': ncc_map,
+            'x_offsets': x_offsets,
+            'z_offsets': z_offsets,
+            'search_bounds': search_bounds,
+            'peak_col': peak_col,
+            'peak_row': peak_row,
+            'best_dx': best_dx,
+            'best_dz': best_dz,
+            'best_ncc': best_ncc
         })
 
-    # 建立圖表
+    # 建立圖表：2 rows (影像, NCC heatmap)
     fig = plt.figure(figsize=(14, 10))
-    gs = fig.add_gridspec(3, 2, height_ratios=[3, 3, 1.5], hspace=0.3, wspace=0.2)
+    gs = fig.add_gridspec(2, 2, height_ratios=[1, 1], hspace=0.25, wspace=0.15)
 
     ax_ref = fig.add_subplot(gs[0, 0])
     ax_mov = fig.add_subplot(gs[0, 1])
-    ax_ref_zoom = fig.add_subplot(gs[1, 0])
-    ax_mov_zoom = fig.add_subplot(gs[1, 1])
-    ax_ncc = fig.add_subplot(gs[2, :])
+    ax_ncc = fig.add_subplot(gs[1, :])
 
-    extent = [x.min(), x.max(), z.max(), z.min()]
+    extent_img = [x.min(), x.max(), z.max(), z.min()]
 
     # Reference Image (固定)
-    ax_ref.imshow(ref_image, extent=extent, cmap='gray', aspect='auto')
+    ax_ref.imshow(ref_image, extent=extent_img, cmap='gray', aspect='auto')
     ax_ref.set_title('Reference Image (Frame 0)', fontsize=12)
     ax_ref.set_xlabel('Lateral (mm)')
     ax_ref.set_ylabel('Axial (mm)')
-    rect_ref = Rectangle((x_min_mm, z_min_mm), x_max_mm - x_min_mm, z_max_mm - z_min_mm,
-                          linewidth=2, edgecolor='yellow', facecolor='none')
+    rect_ref = Rectangle((x_min_mm, z_min_mm), iw_width_mm, iw_height_mm,
+                          linewidth=2, edgecolor='yellow', facecolor='none',
+                          label='Template (IW)')
     ax_ref.add_patch(rect_ref)
-
-    # Reference zoom (固定)
-    ax_ref_zoom.imshow(ref_patch, cmap='gray', aspect='auto')
-    ax_ref_zoom.set_title('Reference IW Patch (Template)', fontsize=11)
-    ax_ref_zoom.axis('off')
+    ax_ref.legend(loc='upper right', fontsize=8)
 
     # Moving Image
-    im_mov = ax_mov.imshow(all_frames[0], extent=extent, cmap='gray', aspect='auto')
+    im_mov = ax_mov.imshow(all_frames[0], extent=extent_img, cmap='gray', aspect='auto')
     ax_mov.set_title('Moving Image (Frame 0)', fontsize=12)
     ax_mov.set_xlabel('Lateral (mm)')
     ax_mov.set_ylabel('Axial (mm)')
 
-    # Search Window (紅色虛線框) - 固定顯示搜索範圍
-    search_range_mm = search_range_pixels * dx
-    search_window_x_min = x_min_mm - search_range_mm
-    search_window_x_max = x_max_mm + search_range_mm
-    search_window_width = search_window_x_max - search_window_x_min
-    rect_search = Rectangle((search_window_x_min, z_min_mm), search_window_width, z_max_mm - z_min_mm,
+    # Search Window (紅色虛線框) - 4mm(Z) × 5mm(X) 矩形
+    search_window_x_min = x_min_mm  # X 起點 = template 位置
+    search_window_x_max = x_min_mm + search_range_x + iw_width_mm
+    search_window_z_min = z_min_mm - search_range_z
+    search_window_z_max = z_max_mm + search_range_z
+    rect_search = Rectangle((search_window_x_min, search_window_z_min),
+                              search_window_x_max - search_window_x_min,
+                              search_window_z_max - search_window_z_min,
                               linewidth=2, edgecolor='red', facecolor='none', linestyle='--',
-                              label='Search Window')
+                              label=f'Search Window ({search_range_z*2:.0f}×{search_range_x:.0f}mm)')
     ax_mov.add_patch(rect_search)
 
     # Best Match (綠色框) - 會隨 NCC peak 移動
-    rect_mov = Rectangle((x_min_mm, z_min_mm), x_max_mm - x_min_mm, z_max_mm - z_min_mm,
+    rect_mov = Rectangle((x_min_mm, z_min_mm), iw_width_mm, iw_height_mm,
                           linewidth=2, edgecolor='lime', facecolor='none', label='Best Match')
     ax_mov.add_patch(rect_mov)
-
-    # 圖例
     ax_mov.legend(loc='upper right', fontsize=8)
 
-    # Moving zoom
-    im_mov_zoom = ax_mov_zoom.imshow(ref_patch, cmap='gray', aspect='auto')
-    ax_mov_zoom.set_title('Best Match Patch', fontsize=11)
-    ax_mov_zoom.axis('off')
+    # 2D NCC Heatmap
+    first_data = all_ncc_data[0]
+    ncc_extent = [first_data['x_offsets'].min(), first_data['x_offsets'].max(),
+                  first_data['z_offsets'].max(), first_data['z_offsets'].min()]
+    im_ncc = ax_ncc.imshow(first_data['ncc_map'], extent=ncc_extent,
+                            cmap='jet', aspect='auto', vmin=0, vmax=1)
+    cbar = plt.colorbar(im_ncc, ax=ax_ncc, label='NCC')
 
-    # NCC curve
-    line_ncc, = ax_ncc.plot([], [], 'b-', linewidth=2, label='NCC')
-    peak_marker, = ax_ncc.plot([], [], 'ro', markersize=10, label='Peak')
-    ax_ncc.set_xlim(-search_range_pixels - 5, search_range_pixels + 5)
-    ax_ncc.set_ylim(-0.2, 1.1)
-    ax_ncc.set_xlabel('Search Offset (pixels)', fontsize=11)
-    ax_ncc.set_ylabel('NCC', fontsize=11)
-    ax_ncc.axhline(y=0.7, color='r', linestyle='--', alpha=0.5, label='Threshold')
+    # Peak marker (十字)
+    peak_marker_h, = ax_ncc.plot([], [], 'w-', linewidth=2)  # 水平線
+    peak_marker_v, = ax_ncc.plot([], [], 'w-', linewidth=2)  # 垂直線
+    peak_dot, = ax_ncc.plot([], [], 'ko', markersize=8, markerfacecolor='white')
+
+    ax_ncc.set_xlabel('X Offset (mm)', fontsize=11)
+    ax_ncc.set_ylabel('Z Offset (mm)', fontsize=11)
+    ax_ncc.set_title('2D NCC Map', fontsize=12)
+    ax_ncc.axhline(y=0, color='gray', linestyle=':', alpha=0.5)
     ax_ncc.axvline(x=0, color='gray', linestyle=':', alpha=0.5)
-    ax_ncc.legend(loc='upper right')
-    ax_ncc.grid(True, alpha=0.3)
 
-    fig.suptitle(f'NCC Template Matching - IW {iw_index}', fontsize=14, fontweight='bold')
+    fig.suptitle(f'2D NCC Template Matching - IW {iw_index}', fontsize=14, fontweight='bold')
 
-    info_text = ax_ncc.text(0.02, 0.95, '', transform=ax_ncc.transAxes,
-                            fontsize=10, verticalalignment='top',
-                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # Info text
+    info_text = fig.text(0.5, 0.02,
+                         f"Frame: 0/{num_frames-1}  |  Best NCC: 0.000  |  dx=0.000mm, dz=0.000mm",
+                         ha='center', fontsize=11,
+                         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
     def update(frame_idx):
         data = all_ncc_data[frame_idx]
         mov_image = all_frames[frame_idx]
 
+        # 更新 moving image
         im_mov.set_array(mov_image)
         ax_mov.set_title(f'Moving Image (Frame {frame_idx})', fontsize=12)
 
-        offset_mm = data['best_offset'] * dx
-        rect_mov.set_xy((x_min_mm + offset_mm, z_min_mm))
+        # 更新 best match 框位置
+        rect_mov.set_xy((x_min_mm + data['best_dx'], z_min_mm + data['best_dz']))
 
-        best_cmin = cmin + data['best_offset']
-        if 0 <= best_cmin < mov_image.shape[1] - (cmax - cmin):
-            mov_patch = mov_image[rmin:rmax+1, best_cmin:best_cmin+(cmax-cmin+1)]
-            im_mov_zoom.set_array(mov_patch)
+        # 更新 2D NCC heatmap
+        ncc_map = data['ncc_map']
+        im_ncc.set_array(ncc_map)
+        im_ncc.set_clim(vmin=ncc_map.min(), vmax=max(ncc_map.max(), 0.1))
 
-        line_ncc.set_data(data['positions'], data['ncc_curve'])
-        peak_marker.set_data([data['best_offset']], [data['best_ncc']])
+        # 更新 extent
+        new_extent = [data['x_offsets'].min(), data['x_offsets'].max(),
+                      data['z_offsets'].max(), data['z_offsets'].min()]
+        im_ncc.set_extent(new_extent)
 
-        displacement_mm = data['best_offset'] * dx
+        # 更新 peak marker (十字)
+        best_dx = data['best_dx']
+        best_dz = data['best_dz']
+        cross_size_x = (data['x_offsets'].max() - data['x_offsets'].min()) * 0.05
+        cross_size_z = (data['z_offsets'].max() - data['z_offsets'].min()) * 0.1
+        peak_marker_h.set_data([best_dx - cross_size_x, best_dx + cross_size_x], [best_dz, best_dz])
+        peak_marker_v.set_data([best_dx, best_dx], [best_dz - cross_size_z, best_dz + cross_size_z])
+        peak_dot.set_data([best_dx], [best_dz])
+
+        # 更新 info text
         info_str = (f"Frame: {frame_idx}/{num_frames-1}  |  "
                     f"Best NCC: {data['best_ncc']:.3f}  |  "
-                    f"Offset: {data['best_offset']} px ({displacement_mm:.3f} mm)")
+                    f"dx={data['best_dx']:.3f}mm, dz={data['best_dz']:.3f}mm")
         info_text.set_text(info_str)
 
-        return [im_mov, rect_mov, im_mov_zoom, line_ncc, peak_marker, info_text]
+        return [im_mov, rect_mov, im_ncc, peak_marker_h, peak_marker_v, peak_dot, info_text]
 
     anim = FuncAnimation(fig, update, frames=num_frames, interval=1000/fps, blit=False)
 
