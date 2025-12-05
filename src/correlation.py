@@ -1,4 +1,5 @@
 import numpy as np
+import cv2
 
 
 def gaussian_subpixel_refinement(ncc_values, peak_idx):
@@ -382,6 +383,255 @@ def estimate_x_displacement_batch(ref_image, mov_image, roi_masks,
         ncc_array[i] = best_ncc
 
     return dx_array, ncc_array
+
+
+# =============================================================================
+# 2D Block Matching with cv2.matchTemplate (True 2D Search)
+# =============================================================================
+
+def gaussian_subpixel_refinement_2d(ncc_map, peak_row, peak_col):
+    """
+    2D sub-pixel refinement using parabolic fitting in both directions.
+
+    Parameters:
+    -----------
+    ncc_map : ndarray (H, W)
+        2D NCC correlation map
+    peak_row, peak_col : int
+        Integer peak position
+
+    Returns:
+    --------
+    refined_row, refined_col : float
+        Sub-pixel refined position
+    """
+    h, w = ncc_map.shape
+
+    # Default to integer position
+    refined_row = float(peak_row)
+    refined_col = float(peak_col)
+
+    # X (column) direction refinement
+    if 0 < peak_col < w - 1:
+        y_minus = ncc_map[peak_row, peak_col - 1]
+        y_center = ncc_map[peak_row, peak_col]
+        y_plus = ncc_map[peak_row, peak_col + 1]
+
+        if y_center > y_minus and y_center > y_plus:
+            denom = 2 * (y_minus - 2 * y_center + y_plus)
+            if abs(denom) > 1e-10:
+                delta_x = (y_minus - y_plus) / denom
+                refined_col = peak_col + np.clip(delta_x, -0.5, 0.5)
+
+    # Z (row) direction refinement
+    if 0 < peak_row < h - 1:
+        y_minus = ncc_map[peak_row - 1, peak_col]
+        y_center = ncc_map[peak_row, peak_col]
+        y_plus = ncc_map[peak_row + 1, peak_col]
+
+        if y_center > y_minus and y_center > y_plus:
+            denom = 2 * (y_minus - 2 * y_center + y_plus)
+            if abs(denom) > 1e-10:
+                delta_z = (y_minus - y_plus) / denom
+                refined_row = peak_row + np.clip(delta_z, -0.5, 0.5)
+
+    return refined_row, refined_col
+
+
+def compute_2d_displacement_ncc(ref_image, mov_image, template_mask,
+                                 search_range_x, search_range_z,
+                                 x_grid, z_grid,
+                                 vessel_params=None):
+    """
+    真正的 2D block matching with NCC (使用 cv2.matchTemplate)
+
+    搜尋視窗：
+    - X 方向: [0, +search_range_x] mm (正向流)
+    - Z 方向: [-search_range_z, +search_range_z] mm (以 IW 中心為基準)
+    - 若提供 vessel_params，會裁切到血管邊界內
+
+    Parameters:
+    -----------
+    ref_image : ndarray (Nz, Nx)
+        參考影像
+    mov_image : ndarray (Nz, Nx)
+        移動影像
+    template_mask : ndarray (Nz, Nx), bool
+        IW 區域 mask
+    search_range_x : float
+        X 方向搜尋範圍 (mm)，只搜正向 [0, +search_range_x]
+    search_range_z : float
+        Z 方向搜尋範圍 (mm)，搜 [-search_range_z, +search_range_z]
+    x_grid, z_grid : ndarray
+        座標軸 (mm)
+    vessel_params : dict, optional
+        血管參數 {'cx': float, 'cz': float, 'R': float}
+        若提供，會將 search window 裁切到血管內
+
+    Returns:
+    --------
+    best_dx : float
+        X 位移 (mm)，正值表示正向流
+    best_dz : float
+        Z 位移 (mm)，正值表示向下
+    max_ncc : float
+        最大 NCC 值
+    """
+    # 1. 從 ref_image 提取 template (IW 區域)
+    rows, cols = np.where(template_mask)
+    if len(rows) == 0 or len(cols) == 0:
+        return 0.0, 0.0, 0.0
+
+    r_min, r_max = rows.min(), rows.max()
+    c_min, c_max = cols.min(), cols.max()
+    template = ref_image[r_min:r_max+1, c_min:c_max+1]
+
+    template_h, template_w = template.shape
+
+    # 2. 計算像素尺寸
+    dx_per_pix = abs(x_grid[1] - x_grid[0])
+    dz_per_pix = abs(z_grid[1] - z_grid[0])
+
+    # 3. 定義 search region 邊界（在 mov_image 中）
+    # X: 從 template 原始位置開始，向正向搜索 search_range_x
+    # Z: 從 template 原始位置上下各搜索 search_range_z
+    search_range_x_pix = int(search_range_x / dx_per_pix)
+    search_range_z_pix = int(search_range_z / dz_per_pix)
+
+    # Search region 邊界（基礎）
+    # X: [c_min, c_min + search_range_x_pix + template_w]
+    # Z: [r_min - search_range_z_pix, r_min + search_range_z_pix + template_h]
+    sr_c_start = c_min
+    sr_c_end = min(c_min + search_range_x_pix + template_w, mov_image.shape[1])
+    sr_r_start = max(r_min - search_range_z_pix, 0)
+    sr_r_end = min(r_min + search_range_z_pix + template_h, mov_image.shape[0])
+
+    # 4. 血管邊界裁切（若提供 vessel_params）
+    if vessel_params is not None:
+        vessel_cx = vessel_params['cx']
+        vessel_cz = vessel_params['cz']
+        vessel_R = vessel_params['R']
+
+        # IW 中心在 mm 座標
+        iw_cx = x_grid[c_min + template_w // 2]
+        iw_cz = z_grid[r_min + template_h // 2]
+
+        # 計算該 X 位置的血管 Z 邊界
+        # 圓方程: (x - cx)^2 + (z - cz)^2 = R^2
+        # 解 z: z = cz ± sqrt(R^2 - (x - cx)^2)
+        dx_from_center = iw_cx - vessel_cx
+        if abs(dx_from_center) < vessel_R:
+            z_extent = np.sqrt(vessel_R**2 - dx_from_center**2)
+            z_top_mm = vessel_cz - z_extent  # 血管上邊界 (mm)
+            z_bottom_mm = vessel_cz + z_extent  # 血管下邊界 (mm)
+
+            # 轉換為像素座標
+            # z_grid[0] 是影像頂部，值較小
+            z_top_pix = int((z_top_mm - z_grid[0]) / dz_per_pix)
+            z_bottom_pix = int((z_bottom_mm - z_grid[0]) / dz_per_pix)
+
+            # 裁切 search region 到血管內
+            sr_r_start = max(sr_r_start, z_top_pix)
+            sr_r_end = min(sr_r_end, z_bottom_pix)
+
+    # 確保 search region 足夠大
+    if sr_c_end - sr_c_start < template_w or sr_r_end - sr_r_start < template_h:
+        return 0.0, 0.0, 0.0
+
+    search_region = mov_image[sr_r_start:sr_r_end, sr_c_start:sr_c_end]
+
+    # 4. 使用 cv2.matchTemplate 計算 NCC map（一次計算所有位置！）
+    ncc_map = cv2.matchTemplate(
+        search_region.astype(np.float32),
+        template.astype(np.float32),
+        cv2.TM_CCOEFF_NORMED
+    )
+    # ncc_map shape: (sr_h - template_h + 1, sr_w - template_w + 1)
+
+    if ncc_map.size == 0:
+        return 0.0, 0.0, 0.0
+
+    # 5. 找到最大 NCC 位置
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(ncc_map)
+    best_col, best_row = max_loc  # (x, y) in ncc_map coordinates
+
+    # 6. Sub-pixel refinement
+    refined_row, refined_col = gaussian_subpixel_refinement_2d(
+        ncc_map, best_row, best_col
+    )
+
+    # 7. 轉換回位移 (mm)
+    # ncc_map 的 (0, 0) 對應 search_region 的 (0, 0)
+    # search_region 的 (0, 0) 對應 mov_image 的 (sr_r_start, sr_c_start)
+    # template 原本在 mov_image 的 (r_min, c_min)
+    #
+    # 在 ncc_map 座標系中：
+    # - (0, 0) 表示 template 放在 search_region 的左上角
+    # - template 原始位置對應 ncc_map 的 (r_min - sr_r_start, c_min - sr_c_start) = (r_min - sr_r_start, 0)
+    #
+    # 位移計算：
+    # dx_pix = refined_col - (c_min - sr_c_start) = refined_col - 0 = refined_col
+    # dz_pix = refined_row - (r_min - sr_r_start)
+
+    origin_row_in_ncc = r_min - sr_r_start
+    origin_col_in_ncc = 0  # 因為 sr_c_start = c_min
+
+    dx_pix = refined_col - origin_col_in_ncc
+    dz_pix = refined_row - origin_row_in_ncc
+
+    best_dx = dx_pix * dx_per_pix
+    best_dz = dz_pix * dz_per_pix
+
+    return best_dx, best_dz, max_val
+
+
+def estimate_2d_displacement_batch(ref_image, mov_image, iw_masks,
+                                    search_range_x, search_range_z,
+                                    x_grid, z_grid,
+                                    vessel_params=None):
+    """
+    批次處理所有 IW 的 2D 位移估計
+
+    使用 cv2.matchTemplate 進行高效 2D block matching。
+
+    Parameters:
+    -----------
+    ref_image, mov_image : ndarray (Nz, Nx)
+        參考和移動影像
+    iw_masks : list of ndarray
+        IW masks
+    search_range_x : float
+        X 方向搜尋範圍 (mm)，只搜正向 [0, +search_range_x]
+    search_range_z : float
+        Z 方向搜尋範圍 (mm)，搜 [-search_range_z, +search_range_z]
+    x_grid, z_grid : ndarray
+        座標軸 (mm)
+    vessel_params : dict, optional
+        血管參數 {'cx': float, 'cz': float, 'R': float}
+        若提供，會將 search window 裁切到血管內
+
+    Returns:
+    --------
+    displacements : ndarray (num_iw, 2)
+        [dx, dz] in mm
+    ncc_values : ndarray (num_iw,)
+        max NCC per IW
+    """
+    num_iw = len(iw_masks)
+    displacements = np.zeros((num_iw, 2))
+    ncc_values = np.zeros(num_iw)
+
+    for i, mask in enumerate(iw_masks):
+        dx, dz, ncc = compute_2d_displacement_ncc(
+            ref_image, mov_image, mask,
+            search_range_x, search_range_z,
+            x_grid, z_grid,
+            vessel_params=vessel_params
+        )
+        displacements[i] = [dx, dz]
+        ncc_values[i] = ncc
+
+    return displacements, ncc_values
 
 
 def create_iw_results(iw_info, displacements, ncc_values, velocities, dt):

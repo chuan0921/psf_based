@@ -73,7 +73,7 @@ class ROIConfig:
 class SimulationConfig:
     num_scatterers = 8000
     num_frames = 100
-    num_iterations = 10
+    num_iterations = 1
     dt = 0.01  # 10 ms (100 Hz frame rate)
 
 class FlowConfig:
@@ -136,13 +136,18 @@ class InterrogationWindowConfig:
     ncc_threshold = 0.7  # Below this = decorrelation (raised to avoid false peaks)
     min_pixels_per_iw = 50  # Minimum pixels for valid IW
 
-    # Search parameters for X-only tracking (ref frame comparison)
-    # 累積位移可能很大，需要較大搜尋範圍
-    # 例如：120 mm/s * 0.003s * 15 frames ≈ 5.4 mm
-    search_range_x = 5.0  # mm (支援 ~15 幀累積位移)
-    search_range_z = 0.8  # mm (暫不使用)
+    # Search parameters for 2D tracking (X + Z)
+    # 搜尋視窗設計：
+    #   X 方向: [0, +search_range_x] mm (正向流 only)
+    #   Z 方向: [-search_range_z, +search_range_z] mm (以 IW 中心為基準)
+    # 例如：10 mm/s * 0.01s * 30 frames = 3 mm
+    search_range_x = 3.0  # mm, X 正向範圍 [0, +3]
+    search_range_z = 1.0  # mm, Z 範圍 [-1, +1]
     search_step_x = 0.02  # mm (與 grid dx 相同，精確追蹤)
-    search_step_z = 0.05  # mm
+    search_step_z = 0.02  # mm (與 grid dx 相同)
+
+    # 血管邊界裁切
+    clip_to_vessel = True  # 將 search window 裁切到血管內
 
 class WSSConfig:
     """WSS constraint configuration for boundary velocity correction.
